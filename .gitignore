@@ -1,0 +1,22 @@
+# secrets and local session
+.env
+.env.*
+!.env.example
+data/
+*.pem
+*.p12
+
+# deps and FCC runtime (install free-claude-code 6.4.10 into fcc/.venv)
+node_modules/
+fcc/.venv/
+fcc/**/fcc-server.exe
+fcc/*.pid
+fcc/update-status.json
+.next/
+out/
+
+# logs / junk
+*.log
+*.exe
+.DS_Store
+Thumbs.db
