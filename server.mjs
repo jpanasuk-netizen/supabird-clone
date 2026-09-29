@@ -530,7 +530,7 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, HOST, async () => {
   const ver = fccVersion();
   const x = hydrateXApp(ROOT);
-  console.log(`SupaBird local http://${HOST}:${PORT}`);
+  console.log(`Blue Jay local http://${HOST}:${PORT}`);
   console.log(`bundled FCC pin ${ver.version} ${ver.commit}`);
   console.log(`X @${x.expectedUsername} client=${x.hasClientId ? "yes *" + x.clientIdHint : "missing"} signedIn=${x.signedIn}`);
   kickFccUpdate();

@@ -1,6 +1,6 @@
-# SupaBird — local X growth lab
+# Blue Jay — local X growth lab
 
-A local command center for X: profile, drafts, generate, and optional Native posting. It binds **http://127.0.0.1:3100** only. Never `:3000`.
+**Blue Jay** is a local command center for X: profile, drafts, generate, and optional Native posting. It binds **http://127.0.0.1:3100** only. Never `:3000`. The GitHub folder may still be `supabird-clone`; the product name on screen is Blue Jay.
 
 Generate does not tweet. Missing metrics stay blank or “not pulled” — never invented zeros.
 

@@ -236,6 +236,7 @@
       const count = xCount(thread.map((p) => p.text).join("\n"));
       const cls = count > LONG ? "over" : count > 280 ? "over280" : "";
       host.innerHTML = `
+        <p class="pill">Blue Jay composer</p>
         <p class="muted" id="xwho">${xStatus.signedIn || xStatus.appOAuth || xStatus.hasToken
           ? "App OAuth signed in @" + (xStatus.username || "user") + " — posting on"
           : (xStatus.pluginConnected || xStatus.userId || xStatus.username)

@@ -183,15 +183,15 @@ function shell(inner) {
   const nav = LINKS.map(([id, label]) =>
     `<a href="#/${id}" class="${view === id ? "active" : ""}">${label}</a>`
   ).join("");
-  return `<div class="shell"><aside class="side"><div class="brand" style="padding:8px 12px 18px">SupaBird</div>${nav}<a href="#/" style="margin-top:24px;color:#f87171">Logout</a></aside><main class="main">${inner}</main></div>`;
+  return `<div class="shell"><aside class="side"><div class="brand" style="padding:8px 12px 18px">Blue Jay</div>${nav}<a href="#/" style="margin-top:24px;color:#f87171">Logout</a></aside><main class="main">${inner}</main></div>`;
 }
 
 function landing() {
   return `
-    <header class="topnav"><div class="brand">SupaBird</div><nav class="row"><a href="#/dashboard">App</a></nav></header>
+    <header class="topnav"><div class="brand">Blue Jay</div><nav class="row"><a href="#/dashboard">App</a></nav></header>
     <section class="hero">
-      <p class="pill">v1.1 · local · 127.0.0.1:3100</p>
-      <h1>AI-powered growth for X<br /><span>that stays on this machine</span></h1>
+      <p class="pill">Blue Jay · v1.1 · local · 127.0.0.1:3100</p>
+      <h1>Blue Jay — AI-powered growth for X<br /><span>that stays on this machine</span></h1>
       <p>Find an idea, rewrite it in your voice, queue it, keep the library. Writes use Settings: bundled Free Claude Code (Sonnet 4.6) or a custom OpenAI-compatible API. Generate never tweets.</p>
       <div class="row" style="justify-content:center">
         <a class="btn" href="#/dashboard">Open the lab</a>
