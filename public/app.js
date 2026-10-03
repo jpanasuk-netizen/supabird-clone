@@ -12,7 +12,8 @@ const LINKS = [
   ["engage", "Engage"],
   ["collections", "Collections"],
   ["calendar", "Calendar"],
-  ["library", "My Library"]
+  ["library", "My Library"],
+  ["trends", "Trends"]
 ];
 const EMPTY = {
   profile: { name: "Jeremy", xHandle: "Jasper_Black", niche: "AI tools", voice: "plain, specific, no hype" },
@@ -960,6 +961,12 @@ function render() {
         if (note) { note.className = "warn"; note.textContent = String(err.message || err); }
       }
     };
+    return;
+  }
+
+  if (view === "trends") {
+    root.innerHTML = shell(`<div id="bj-trends"><h1>Trends</h1><p class="muted">Loading from X Trends Desk…</p></div>`);
+    if (window.renderBlueJayTrends) window.renderBlueJayTrends(root.querySelector("#bj-trends"));
     return;
   }
 

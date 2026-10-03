@@ -321,8 +321,30 @@ async function handleSettings(req, res) {
 }
 
 const PUBLIC = path.join(ROOT, "public");
+// X Trends Desk bridge. The desk (127.0.0.1:3489, in WSL) may read /api/health and save drafts
+// via /api/x/drafts from the browser; nothing else is opened cross-origin. Drafts never post.
+const TRENDS_DESK = "http://127.0.0.1:3489";
+const TRENDS_ORIGINS = new Set(["http://127.0.0.1:3489", "http://localhost:3489"]);
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || "/", `http://${HOST}`);
+  const origin = req.headers.origin || "";
+  if (TRENDS_ORIGINS.has(origin) && (url.pathname === "/api/health" || url.pathname === "/api/x/drafts")) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+    if (req.method === "OPTIONS") {
+      res.writeHead(204, { "Access-Control-Allow-Methods": "GET, POST", "Access-Control-Allow-Headers": "content-type", "Access-Control-Max-Age": "600" }).end();
+      return;
+    }
+  }
+  if (req.method === "GET" && url.pathname === "/api/trends/summary") {
+    try {
+      const r = await fetch(TRENDS_DESK + "/api/summary", { signal: AbortSignal.timeout(4000) });
+      json(res, r.status, await r.json());
+    } catch {
+      json(res, 502, { ok: false, error: "X Trends Desk offline" });
+    }
+    return;
+  }
   if (req.method === "POST" && url.pathname === "/api/generate") {
     await handleGenerate(req, res);
     return;
