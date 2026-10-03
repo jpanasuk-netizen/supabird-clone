@@ -1,0 +1,10 @@
+.xai-key
+.env*
+reports/
+usage.jsonl
+replies.json
+settings.json
+topics.json
+node_modules/
+*.log
+*.exe
