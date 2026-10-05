@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
-import { ensureAccess, hasUserAccessToken, loadXStore, tokenValue, xPublicStatus } from "./x-oauth.mjs";
+import { ensureAccess, hasUserAccessToken, loadXStore, saveXStore, tokenValue, xPublicStatus } from "./x-oauth.mjs";
+import { runCmd, which } from "./trends-desk/reach.mjs";
 
 const ME = "https://api.twitter.com/2/users/me";
 const TWEETS = "https://api.twitter.com/2/tweets";
@@ -52,6 +53,66 @@ export function loadWorld(root) {
   } catch {
     return emptyWorld();
   }
+}
+
+export function countOrNull(v) {
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string" && /^[\d,]+$/.test(v.trim())) {
+    const n = Number(v.replace(/,/g, ""));
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+export function applySignedInUser(world, user, at) {
+  const metricsIn = (user && (user.public_metrics || user.metrics)) || {};
+  const pick = (metricKey, alt) => countOrNull(metricsIn[metricKey] != null ? metricsIn[metricKey] : user && user[alt]);
+  const followers = pick("followers_count", "followers");
+  const following = pick("following_count", "following");
+  const tweets = pick("tweet_count", "tweets");
+  const likes = pick("like_count", "likes");
+  const metrics = {};
+  if (followers != null) metrics.followers_count = followers;
+  if (following != null) metrics.following_count = following;
+  if (tweets != null) metrics.tweet_count = tweets;
+  if (likes != null) metrics.like_count = likes;
+  const username = String((user && (user.username || user.screen_name)) || "").replace(/^@/, "");
+  world.profile = {
+    id: String((user && user.id) || ""),
+    username,
+    name: String((user && user.name) || ""),
+    description: String((user && (user.description || user.bio)) || ""),
+    metrics,
+    createdAt: String((user && (user.created_at || user.createdAt)) || ""),
+    capturedAt: at
+  };
+  world.followerHistory = Array.isArray(world.followerHistory) ? world.followerHistory : [];
+  if (followers != null) {
+    const prev = world.followerHistory.find((row) => row && row.at !== at && typeof row.followers === "number");
+    world.followerHistory.unshift({ at, followers });
+    world.followerHistory = world.followerHistory.slice(0, 120);
+    world.profile.followerDelta = prev ? followers - prev.followers : null;
+  }
+  return world.profile;
+}
+
+export function parseProfilePayload(raw) {
+  const text = String(raw || "").trim();
+  if (!text || text.startsWith("<")) return null;
+  let data;
+  try { data = JSON.parse(text); } catch { return null; }
+  const row = Array.isArray(data)
+    ? data[0]
+    : data && (data.screen_name || data.username)
+      ? data
+      : data && data.data && !Array.isArray(data.data)
+        ? data.data
+        : data && Array.isArray(data.data)
+          ? data.data[0]
+          : null;
+  if (!row || typeof row !== "object") return null;
+  if (!row.screen_name && !row.username && !row.name) return null;
+  return row;
 }
 
 export function saveWorld(root, world) {
@@ -269,6 +330,50 @@ export function queueLocal(root, item) {
   return row;
 }
 
+export async function reloadOpenProfile(root, opts = {}) {
+  const store = loadXStore(root);
+  const username = String(store.username || store.expectedUsername || "").replace(/^@/, "");
+  const summaryNow = () => readCommandCenter(root);
+  if (!username) {
+    return { ok: false, error: "Not signed in. Profile was not reloaded.", summary: summaryNow() };
+  }
+  const run = opts.run || runCmd;
+  const whichFn = opts.which || which;
+  let raw = "";
+  let backend = "";
+  try {
+    if (whichFn("opencli")) {
+      backend = "opencli";
+      raw = await run("opencli", ["twitter", "profile", username, "-f", "json"]);
+    } else if (whichFn("twitter")) {
+      backend = "twitter-cli";
+      raw = await run("twitter", ["user", username, "--json"]);
+    } else {
+      return { ok: false, error: "Profile was not reloaded. No X user token, and OpenCLI is not installed.", summary: summaryNow() };
+    }
+  } catch (err) {
+    return { ok: false, error: "Profile was not reloaded. " + clip(err.message || err), summary: summaryNow() };
+  }
+  const user = parseProfilePayload(raw);
+  if (!user) return { ok: false, error: "Profile was not reloaded. " + backend + " returned no user.", summary: summaryNow() };
+  const world = loadWorld(root);
+  const at = new Date().toISOString();
+  applySignedInUser(world, user, at);
+  if (world.profile.username) store.username = world.profile.username;
+  if (world.profile.id) store.userId = world.profile.id;
+  saveXStore(root, store);
+  world.lastSync = {
+    at,
+    ok: true,
+    reason: "refresh",
+    source: backend,
+    error: null,
+    endpoints: [{ name: backend + " profile", status: 200, ok: true, count: 1 }]
+  };
+  saveWorld(root, world);
+  return { ok: true, lastSync: world.lastSync, summary: summarize(world, xPublicStatus(store)) };
+}
+
 function pluginOnlyResult(root, reason) {
   const world = loadWorld(root);
   const started = new Date().toISOString();
@@ -311,6 +416,7 @@ export async function syncXWorld(root, opts = {}) {
   const endpoints = [];
   const pages = opts.full ? 8 : 3;
   if (!hasUserAccessToken(loadXStore(root))) {
+    if ((opts.reason || "") === "refresh") return reloadOpenProfile(root, opts);
     return pluginOnlyResult(root, opts.reason || "refresh");
   }
   let store;
@@ -342,22 +448,10 @@ export async function syncXWorld(root, opts = {}) {
   const meUrl = `${ME}?user.fields=${USER_FIELDS}`;
   const me = await hit("users/me", meUrl, (res) => {
     const u = res.data.data || {};
-    const followers = u.public_metrics && u.public_metrics.followers_count;
-    world.profile = {
-      id: u.id,
-      username: u.username,
-      name: u.name,
-      description: u.description || "",
-      metrics: u.public_metrics || {},
-      createdAt: u.created_at,
-      capturedAt: started
-    };
-    if (typeof followers === "number") {
-      const prev = world.followerHistory[0];
-      world.followerHistory.unshift({ at: started, followers });
-      world.followerHistory = world.followerHistory.slice(0, 120);
-      world.profile.followerDelta = prev && typeof prev.followers === "number" ? followers - prev.followers : null;
-    }
+    applySignedInUser(world, u, started);
+    if (u.username) store.username = u.username;
+    if (u.id) store.userId = String(u.id);
+    saveXStore(root, store);
     return 1;
   });
   if (!me.ok) {

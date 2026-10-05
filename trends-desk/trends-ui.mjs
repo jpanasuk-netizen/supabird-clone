@@ -4,8 +4,9 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, chmodS
 import { homedir } from "node:os";
 import { SpaceXAI } from "@xai-official/sdk";
 import { xSearch } from "@xai-official/sdk/tools";
+import { chooseBackend, instagramAccount, isCreditBlock, parseHandleList, reachBackends, reportFromPosts, reportSource, searchX, threadReplies } from "./reach.mjs";
 
-const PORT = 3489, KEYFILE = ".xai-key", DIR = "reports", TOPICS_F = "topics.json", SET_F = "settings.json", USAGE_F = "usage.jsonl", REPLIES_F = "replies.json";
+const PORT = 3489, KEYFILE = ".xai-key", DIR = "reports", TOPICS_F = "topics.json", SET_F = "settings.json", USAGE_F = "usage.jsonl", REPLIES_F = "replies.json", IG_F = "ig.json";
 const BLUEJAY = "http://127.0.0.1:3100";
 mkdirSync(DIR, { recursive: true });
 const getKey = () => (existsSync(KEYFILE) ? readFileSync(KEYFILE, "utf8").trim() : "") || process.env.XAI_API_KEY || "";
@@ -16,7 +17,7 @@ let topics = loadJ(TOPICS_F, [
   { id: "law", name: "⚖️ Law", desc: "legal news, court rulings, Supreme Court, lawsuits, legal commentary, regulation" },
   { id: "finance", name: "💵 Finance", desc: "markets, stocks, the Fed, interest rates, crypto, earnings, economy" },
 ]);
-let settings = { model: "grok-4.7", auto: false, every: 60, focus: "", daily: true, dailyAt: "06:00", dailyDone: "", lastMuse: null, ...loadJ(SET_F, {}) };
+let settings = { model: "grok-4.7", auto: false, every: 60, focus: "", daily: true, dailyAt: "06:00", dailyDone: "", lastMuse: null, reach: "auto", ig: "", ...loadJ(SET_F, {}) };
 const saveTopics = () => writeFileSync(TOPICS_F, JSON.stringify(topics, null, 1));
 const saveSettings = () => writeFileSync(SET_F, JSON.stringify(settings, null, 1));
 if (!existsSync(TOPICS_F)) saveTopics();
@@ -35,7 +36,10 @@ function friendly(e) {
 }
 const client = () => new SpaceXAI({ apiKey: getKey() });
 
-async function runTopic(t) {
+function stampFile(id) {
+  return `${id}-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}.md`;
+}
+async function runTopicXai(t) {
   const from = new Date(Date.now() - 864e5).toISOString().slice(0, 10);
   const r = await client().responses.create({
     model: settings.model,
@@ -49,10 +53,35 @@ Find the top 5 topics getting the most engagement right now. For each give exact
 - Idea: one reply or post I could write, plain and punchy
 Only use what you actually found. Don't make up numbers.`,
   });
-  const f = `${t.id}-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}.md`;
+  const f = stampFile(t.id);
   writeFileSync(`${DIR}/${f}`, r.toText());
   runs[t.id].usage = recordUsage("run", t.id, r.usage);
+  runs[t.id].source = "xai";
   return f;
+}
+async function runTopicReach(t) {
+  const q = [t.desc, settings.focus].filter(Boolean).join(" ").replace(/\s+/g, " ").slice(0, 180);
+  const found = await searchX(q, { limit: 5 });
+  const f = stampFile(t.id);
+  writeFileSync(`${DIR}/${f}`, reportFromPosts(found.posts, found.backend));
+  runs[t.id].usage = null;
+  runs[t.id].source = "reach:" + found.backend;
+  if (settings.ig) refreshInstagram(false).catch((e) => console.log(new Date().toISOString(), "instagram pull", String(e.message || e).slice(0, 180)));
+  return f;
+}
+async function runTopic(t) {
+  const mode = settings.reach || "auto";
+  if (chooseBackend({ reach: mode, hasKey: !!getKey() }) === "xai") {
+    try { return await runTopicXai(t); }
+    catch (e) {
+      if (mode === "off" || !isCreditBlock(e)) throw e;
+      runs[t.id].fallback = friendly(e);
+      console.log(new Date().toISOString(), "xAI blocked, AgentReach", t.id, runs[t.id].fallback);
+    }
+  } else if (chooseBackend({ reach: mode, hasKey: !!getKey() }) === "stop") {
+    throw new Error("Enter your API key first.");
+  }
+  return runTopicReach(t);
 }
 
 // ---- Usage / cost meter. Dollars only from the API's own cost field; otherwise an estimate
@@ -132,9 +161,10 @@ function diffFor(f) {
 function summary() {
   const all = listReports();
   return topics.map((t) => {
-    const L = all.find((r) => r.topic === t.id); if (!L) return { id: t.id, name: t.name, latest: null, trends: [], fading: [] };
+    const L = all.find((r) => r.topic === t.id); if (!L) return { id: t.id, name: t.name, latest: null, trends: [], fading: [], source: "" };
     const d = diffFor(L.f) || { tags: [], fading: [] };
-    return { id: t.id, name: t.name, latest: L, basis: d.basis, trends: parseReport(readR(L.f)).map((x, i) => ({ ...x, ...(d.tags[i] || {}) })), fading: d.fading };
+    const md = readR(L.f);
+    return { id: t.id, name: t.name, latest: L, basis: d.basis, source: reportSource(md), trends: parseReport(md).map((x, i) => ({ ...x, ...(d.tags[i] || {}) })), fading: d.fading };
   });
 }
 
@@ -173,29 +203,85 @@ for (const e of replies) if (e.status === "running") { e.status = "error"; e.err
 const isStatus = (u) => /^https:\/\/(x|twitter)\.com\/[A-Za-z0-9_]{1,15}\/status\/\d+/.test(u || "");
 const clip = (v, n) => String(v ?? "").slice(0, n);
 function extractJson(t) { const a = t.indexOf("{"), b = t.lastIndexOf("}"); if (a < 0 || b < a) throw new Error("Grok didn't return usable results. Try again."); return JSON.parse(t.slice(a, b + 1)); }
-async function findReplies(e, ctx) {
-  try {
-    const from = new Date(Date.now() - 2 * 864e5).toISOString().slice(0, 10);
-    const r = await client().responses.create({ model: settings.model, tools: [xSearch({ from_date: from })],
-      input: `Trend: ${e.trend}\nContext: ${clip(ctx, 800)}\n
+function mapReplyPost(p) {
+  return {
+    author: clip(p.author, 40), url: p.url, text: clip(p.text, 400), engagement: clip(p.engagement, 80),
+    replies: (Array.isArray(p.replies) ? p.replies : []).filter((x) => isStatus(x.url) && String(x.text || "").trim() && x.url !== p.url).slice(0, 3)
+      .map((x) => ({ author: clip(x.author, 40), url: x.url, text: clip(x.text, 1000), engagement: clip(x.engagement, 80) }))
+  };
+}
+async function findRepliesXai(e, ctx) {
+  const from = new Date(Date.now() - 2 * 864e5).toISOString().slice(0, 10);
+  const r = await client().responses.create({ model: settings.model, tools: [xSearch({ from_date: from })],
+    input: `Trend: ${e.trend}\nContext: ${clip(ctx, 800)}\n
 Use X search. Step 1: find the 3 biggest recent X posts about this trend (most likes/reposts/views). Step 2: for each of those posts, find the replies real people posted under it, and pick up to 3 of the best hot-take replies (sharp, opinionated, high engagement).
 RULES: Quote replies VERBATIM, exactly as posted. Only include a reply you actually retrieved from X search, with its real status URL. Never write, paraphrase, summarize or invent a reply. If you could not retrieve real replies for a post, give it an empty replies list. Include engagement numbers only if search returned them, else "".
 Return ONLY this JSON, no prose: {"posts":[{"author":"@handle","url":"https://x.com/handle/status/ID","text":"first ~200 chars of the post","engagement":"","replies":[{"author":"@handle","url":"https://x.com/handle/status/ID","text":"verbatim reply","engagement":""}]}]}` });
-    e.usage = recordUsage("replies", e.topic, r.usage);
-    const j = extractJson(r.toText());
-    e.posts = (Array.isArray(j.posts) ? j.posts : []).filter((p) => isStatus(p.url)).slice(0, 3).map((p) => ({
-      author: clip(p.author, 40), url: p.url, text: clip(p.text, 400), engagement: clip(p.engagement, 80),
-      replies: (Array.isArray(p.replies) ? p.replies : []).filter((x) => isStatus(x.url) && String(x.text || "").trim() && x.url !== p.url).slice(0, 3)
-        .map((x) => ({ author: clip(x.author, 40), url: x.url, text: clip(x.text, 1000), engagement: clip(x.engagement, 80) })) }));
-    e.status = "done";
+  e.usage = recordUsage("replies", e.topic, r.usage);
+  const j = extractJson(r.toText());
+  e.posts = (Array.isArray(j.posts) ? j.posts : []).filter((p) => isStatus(p.url)).slice(0, 3).map(mapReplyPost);
+  e.status = "done";
+  e.backend = "xai";
+}
+async function findRepliesReach(e) {
+  const found = await searchX(e.trend, { limit: 3 });
+  const posts = [];
+  for (const p of found.posts.slice(0, 3)) {
+    let replies = [];
+    try { replies = await threadReplies(p.url); } catch { replies = []; }
+    posts.push(mapReplyPost({ ...p, author: p.author ? "@" + p.author.replace(/^@/, "") : "", replies }));
+  }
+  e.posts = posts.filter((p) => isStatus(p.url));
+  e.usage = null;
+  e.backend = found.backend;
+  e.status = "done";
+}
+async function findReplies(e, ctx) {
+  const mode = settings.reach || "auto";
+  try {
+    if (chooseBackend({ reach: mode, hasKey: !!getKey() }) === "xai") {
+      try { await findRepliesXai(e, ctx); }
+      catch (err) {
+        if (mode === "off" || !isCreditBlock(err)) throw err;
+        e.fallback = friendly(err);
+        await findRepliesReach(e);
+      }
+    } else if (chooseBackend({ reach: mode, hasKey: !!getKey() }) === "stop") {
+      throw new Error("Enter your API key first.");
+    } else await findRepliesReach(e);
   } catch (err) { e.status = "error"; e.error = err instanceof SyntaxError ? "Grok's answer wasn't valid JSON. Try again." : friendly(err); }
   saveReplies();
+}
+
+let igState = loadJ(IG_F, { accounts: [], error: "", pulledAt: 0 });
+function saveIg() { writeFileSync(IG_F, JSON.stringify(igState)); }
+function igPublic() {
+  return { accounts: igState.accounts || [], error: igState.error || "", pulledAt: igState.pulledAt || 0 };
+}
+let igFlight = null;
+async function refreshInstagram(force) {
+  const names = parseHandleList(settings.ig || "");
+  if (!names.length) { igState = { accounts: [], error: "", pulledAt: igState.pulledAt || 0 }; saveIg(); return igState; }
+  if (!force && igState.pulledAt && Date.now() - igState.pulledAt < 10 * 60e3) return igState;
+  if (igFlight) return igFlight;
+  igFlight = (async () => {
+    const accounts = [];
+    const errors = [];
+    for (const username of names) {
+      try { accounts.push(await instagramAccount(username)); }
+      catch (e) { errors.push("@" + username + ": " + String(e.message || e).slice(0, 180)); }
+    }
+    igState = { accounts, error: errors.join(" · "), pulledAt: Date.now() };
+    saveIg();
+    return igState;
+  })();
+  try { return await igFlight; } finally { igFlight = null; }
 }
 
 // Server-side run queue (one at a time) + auto-refresh timer
 const runs = {}, queue = []; let working = false, lastError = "", nextRun = null, timer = null;
 function enqueue(ids) {
-  if (!getKey()) return "Enter your API key first.";
+  if (chooseBackend({ reach: settings.reach || "auto", hasKey: !!getKey() }) === "stop") return "Enter your API key first.";
   for (const id of ids) {
     if (!topics.find((t) => t.id === id)) continue;
     const s = (runs[id] ||= {});
@@ -266,9 +352,14 @@ function listReports(q) {
 }
 function state() {
   const all = listReports(), latest = {};
-  for (const r of all) if (!latest[r.topic]) latest[r.topic] = r;
+  for (const r of all) if (!latest[r.topic]) {
+    let source = "";
+    try { source = reportSource(readR(r.f)); } catch { /* missing report */ }
+    latest[r.topic] = { ...r, source };
+  }
   return { ok: true, hasKey: !!getKey(), keySource: keySource(), settings, topics, runs, latest, lastRun: all[0]?.t || null, nextRun, nextDaily: nextDaily(), lastError,
-    usage: usageSummary(), repliesVer, repliesBusy: replies.filter((e) => e.status === "running").length };
+    usage: usageSummary(), repliesVer, repliesBusy: replies.filter((e) => e.status === "running").length,
+    reachBackends: reachBackends(), ig: igPublic() };
 }
 
 const page = String.raw`<!doctype html><html><head><meta charset="utf-8"><title>X Trends Desk</title>
@@ -296,6 +387,7 @@ details.fade{margin-top:12px;color:var(--m);font-size:13px;background:var(--p2);
 .dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--r);margin-right:6px}.dot.on{background:var(--g)}a.btnl{display:inline-flex;align-items:center;border:1px solid #2a3647;border-radius:8px;color:var(--t);text-decoration:none}
 input[type=time]{padding:5px 8px;color-scheme:dark}#cost{font-size:13px;cursor:help}#cost b{color:var(--t);font-weight:600}
 #cols{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(460px,1fr);gap:18px;overflow-x:auto;min-height:0}
+#ig{grid-column:1/-1;max-height:30vh}
 .col,aside{background:var(--p);border:1px solid var(--b);border-radius:14px;display:flex;flex-direction:column;min-height:0}
 .col h2,aside h2{margin:0;padding:12px 14px;font-size:17px;display:flex;gap:8px;align-items:center;border-bottom:1px solid var(--b)}
 .col h2 .nm{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.meta{color:var(--m);font-size:12.5px;font-weight:400}
@@ -326,6 +418,8 @@ footer{display:flex;gap:18px;align-items:center;padding:6px 22px;border-top:1px 
 <div class=grp><input id=key type=password autocomplete=off placeholder="Paste your xAI API key"><button onclick="saveKey()">Save key</button></div>
 <div class=grp><label for=model>Model</label><input id=model list=mlist spellcheck=false onchange="setS({model:this.value.trim()})"><datalist id=mlist></datalist></div>
 <div class=grp><input id=focus placeholder="Optional focus: SEC, crypto law, bankruptcy…"><button id=runall onclick="runT('all')">▶ Run all</button></div>
+<div class=grp><label for=reach>Secondary</label><select id=reach onchange="setS({reach:this.value})"><option value=auto>xAI, then AgentReach</option><option value=only>AgentReach only</option><option value=off>xAI only</option></select></div>
+<div class=grp><input id=ig placeholder="Instagram: nasa, esa" style="width:220px"><button class=sm type=button onclick="saveIg()">Save</button><button class=sm type=button onclick="pullIg()">Pull</button></div>
 <div class=grp><label><input type=checkbox id=auto onchange="setS({auto:this.checked,every:+every.value})"> Auto-refresh</label>
 <select id=every onchange="setS({auto:auto.checked,every:+this.value})"><option value=30>every 30m</option><option value=60>every 1h</option><option value=180>every 3h</option><option value=360>every 6h</option></select>
 <label><input type=checkbox id=daily onchange="setS({daily:this.checked})"> Daily</label><input type=time id=dailyAt onchange="setS({dailyAt:this.value})">
@@ -335,7 +429,8 @@ footer{display:flex;gap:18px;align-items:center;padding:6px 22px;border-top:1px 
 <main><div id=cols></div>
 <aside><h2>🗂 Report history <span class=sp></span><span id=hcount class=meta></span></h2>
 <div class=tools><input id=q placeholder="Search reports (topic, words, @handle)…" oninput="clearTimeout(hist.t);hist.t=setTimeout(hist,250)"></div><ul id=hist></ul></aside>
-<section id=rp class=col><h2>💬 Replies <span class=meta>Real replies found by Grok X search, quoted verbatim. Open the links to confirm. Nothing is ever posted.</span><span class=sp></span><span id=rpc class=meta></span></h2><div class=rlist id=rlist><div class=empty>Hit “💬 Get replies” on any trend card.</div></div></section></main>
+<section id=ig class=col><h2>📷 Instagram <span class=meta id=igmeta>OpenCLI when Chrome is logged in. Jina Reader when it is rate-limited. Counts stay blank if a pull did not return them.</span></h2><div class=out id=igout><div class=empty>Add usernames above, then Pull.</div></div></section>
+<section id=rp class=col><h2>💬 Replies <span class=meta>Real replies only. xAI when credits work, otherwise AgentReach (OpenCLI thread). Nothing is ever posted.</span><span class=sp></span><span id=rpc class=meta></span></h2><div class=rlist id=rlist><div class=empty>Hit “💬 Get replies” on any trend card.</div></div></section></main>
 <footer><span id=sKey>…</span><span>Model: <b id=sModel></b></span><span id=sRun>Idle</span><span id=sMuse></span><span id=sErr></span><span>Times in CT</span></footer>
 <div id=ov onclick="if(event.target===this)closeDlg()"><div id=dlg><div class=hd><b id=dt></b><span id=da></span><button class="sm ghost" onclick="closeDlg()">✕</button></div><div class=bd id=db></div></div></div>
 <div id=toast></div>
@@ -370,10 +465,12 @@ function tname(id){const t=S.topics.find(x=>x.id===id);return t?t.name:id}
 function cols(){const k=JSON.stringify(S.topics);if(k===tkey)return;tkey=k;shown={};
  $('cols').innerHTML=S.topics.map(t=>'<section class=col id="c-'+t.id+'"><h2><span class=nm title="'+esc(t.desc)+'">'+esc(t.name)+'</span><span class=meta></span><button class=sm onclick="runT(\''+t.id+'\')">▶ Run</button><button class="sm ghost" title="Remove column" onclick="rmT(\''+t.id+'\')">✕</button></h2><div class=err hidden></div><div class=out><div class=empty>Not run yet. Hit Run.</div></div></section>').join('')||'<div class=empty>No columns. Add one.</div>'}
 async function tick(){const j=await api('/api/state');if(j.ok===false){$('sErr').textContent=j.error;return}S=j;cols();
- $('sKey').innerHTML=S.hasKey?'<span class=ok>● Key saved'+(S.keySource==='env'?' (from env)':'')+'</span>':'<span class=bad>● No API key — paste one above</span>';
+ const reachMode=S.settings.reach||'auto';
+ $('sKey').innerHTML=S.hasKey?'<span class=ok>● Key saved'+(S.keySource==='env'?' (from env)':'')+'</span>':(reachMode==='off'?'<span class=bad>● No API key — paste one above</span>':'<span class=ok>● No xAI key — AgentReach will search</span>');
  $('key').placeholder=S.hasKey?'Key saved ✓ (paste a new one to replace)':'Paste your xAI API key';
  if(document.activeElement!==$('model'))$('model').value=S.settings.model;$('sModel').textContent=S.settings.model;
- $('auto').checked=S.settings.auto;$('every').value=S.settings.every;if(first){$('focus').value=S.settings.focus||'';first=0}
+ $('auto').checked=S.settings.auto;$('every').value=S.settings.every;if(first){$('focus').value=S.settings.focus||'';$('ig').value=S.settings.ig||'';first=0}
+ if(document.activeElement!==$('reach'))$('reach').value=reachMode;
  $('last').textContent=CT(S.lastRun);const nx=[S.settings.auto&&S.nextRun,S.nextDaily].filter(Boolean).sort((a,b)=>a-b)[0];$('next').textContent=nx?CT(nx)+(nx===S.nextDaily?' (daily)':''):'off';
  $('daily').checked=S.settings.daily;if(document.activeElement!==$('dailyAt'))$('dailyAt').value=S.settings.dailyAt;
  const U=S.usage||{};if(U.total){$('uLast').textContent=U.last?fmtTok(U.last.tok)+money(U.last):'—';$('uToday').textContent=fmtTok(U.today.tok)+money(U.today);$('uTotal').textContent=fmtTok(U.total.tok)+money(U.total);
@@ -382,11 +479,13 @@ async function tick(){const j=await api('/api/state');if(j.ok===false){$('sErr')
  if(S.repliesVer!==rVer){rVer=S.repliesVer;loadReplies()}
  let busy=0;
  for(const t of S.topics){const c=$('c-'+t.id);if(!c)continue;const r=S.runs[t.id]||{},m=c.querySelector('.meta'),e=c.querySelector('.err'),L=S.latest[t.id];
-  if(r.status==='running'){busy++;m.innerHTML='<span class=spin></span> searching X…'}else if(r.status==='queued'){busy++;m.textContent='queued'}else m.textContent=(L?CT(L.t):'')+(r.usage?' · '+fmtTok(r.usage.total||r.usage.in+r.usage.out)+' tok'+money({api:r.usage.cost_usd||0,est:0}):'');
+  const viaSrc=r.source||(L&&L.source)||'';
+  const via=viaSrc.startsWith('reach')?' · AgentReach':viaSrc==='xai'?' · xAI':'';
+  if(r.status==='running'){busy++;m.innerHTML='<span class=spin></span> searching…'}else if(r.status==='queued'){busy++;m.textContent='queued'}else m.textContent=(L?CT(L.t):'')+via+(r.usage?' · '+fmtTok(r.usage.total||r.usage.in+r.usage.out)+' tok'+money({api:r.usage.cost_usd||0,est:0}):'');
   e.hidden=r.status!=='error';if(r.status==='error')e.textContent=r.error;
   if(L&&shown[t.id]!==L.f){shown[t.id]=L.f;fetch('/api/report?f='+encodeURIComponent(L.f)).then(x=>x.text()).then(md=>render(md,c.querySelector('.out'),t.id,L.f))}
   else if(!L&&shown[t.id]){shown[t.id]=0;c.querySelector('.out').innerHTML='<div class=empty>Not run yet. Hit Run.</div>'}}
- $('sRun').innerHTML=busy?'<span class=spin></span> '+busy+' running/queued':'Idle';$('sErr').textContent=S.lastError||'';$('runall').disabled=busy>0;
+ $('sRun').innerHTML=busy?'<span class=spin></span> '+busy+' running/queued':'Idle';$('sErr').textContent=S.lastError||'';$('runall').disabled=busy>0;renderIg();
  if(busy!==tick.b){tick.b=busy;hist()}}
 async function runT(id){const j=await api('/api/run',{topic:id,focus:$('focus').value});if(!j.ok)toast(j.error,1);tick()}
 async function saveKey(){const k=$('key').value.trim();if(!k)return;const j=await api('/api/key',{key:k});$('key').value='';j.ok?toast('Key saved on this PC'):toast(j.error,1);tick();loadModels()}
@@ -403,7 +502,16 @@ function addDlg(){dlg('Add a topic column','','<div class=form><input id=an plac
 async function addT(){const j=await api('/api/topics',{action:'add',name:$('an').value,desc:$('ad').value});if(!j.ok)return toast(j.error,1);closeDlg();toast('Column added');tick()}
 async function rmT(id){if(!confirm('Remove the "'+tname(id)+'" column? Its saved reports stay in history.'))return;const j=await api('/api/topics',{action:'remove',id});j.ok?tick():toast(j.error,1)}
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closeDlg();if(e.key==='Enter'&&e.target.id==='key')saveKey();if(e.key==='Enter'&&(e.target.id==='an'||e.target.id==='ad'))addT()});
-async function getReplies(k){const c=cards[k],cs=RL.filter(e=>e.usage&&e.usage.cost_usd).map(e=>e.usage.cost_usd);if(cs.length&&!confirm('Get replies runs a deep X search. Recent ones cost about $'+(cs.reduce((a,b)=>a+b,0)/cs.length).toFixed(2)+' each (from the API). Continue?'))return;$('rp').scrollIntoView({behavior:'smooth',block:'end'});const j=await api('/api/replies',{topic:c.topic,title:c.title,text:c.body});if(!j.ok)return toast(j.error,1);toast('Searching X for real replies…');tick()}
+function renderIg(){const ig=S.ig||{accounts:[]},acc=ig.accounts||[];
+ $('igmeta').textContent=(ig.pulledAt?CT(ig.pulledAt)+' · ':'')+(ig.error||'OpenCLI when Chrome is logged in. Jina Reader when it is rate-limited.');
+ $('igout').innerHTML=acc.length?'<div class=cards>'+acc.map(a=>{
+  const counts=[a.followers!=null?esc(a.followers)+' followers':'',a.following!=null?esc(a.following)+' following':'',a.postsCount!=null?esc(a.postsCount)+' posts':''].filter(Boolean).join(' · ')||'Counts not returned';
+  const posts=(a.posts||[]).slice(0,4).map(p=>'<p>'+esc(p.text||'')+(p.engagement?' <span class=muted>'+esc(p.engagement)+'</span>':'')+'</p>').join('');
+  return '<article class=card style="padding-left:14px"><h3>@'+esc(a.username||'')+' <span class="tag '+(a.backend==='jina'?'FADING':'NEW')+'">'+esc(a.backend||'')+'</span></h3><p class=muted>'+counts+(a.bio?'<br>'+esc(a.bio):'')+'</p>'+posts+'</article>';
+ }).join('')+'</div>':'<div class=empty>'+(S.settings.ig?'No Instagram rows yet. Hit Pull.':'Add usernames above, then Pull.')+'</div>'}
+async function saveIg(){const j=await api('/api/settings',{ig:$('ig').value});j.ok?toast('Instagram list saved'):toast(j.error,1);tick()}
+async function pullIg(){toast('Pulling Instagram…');const j=await api('/api/instagram',{});j.ok?toast(j.error?'Pulled with gaps':'Instagram updated'):toast(j.error,1);tick()}
+async function getReplies(k){const c=cards[k],cs=RL.filter(e=>e.usage&&e.usage.cost_usd).map(e=>e.usage.cost_usd);const reachMode=S.settings.reach||'auto';if(S.hasKey&&reachMode!=='only'&&cs.length&&!confirm('Get replies tries xAI first. Recent xAI searches cost about $'+(cs.reduce((a,b)=>a+b,0)/cs.length).toFixed(2)+' each. If credits fail, AgentReach runs instead. Continue?'))return;$('rp').scrollIntoView({behavior:'smooth',block:'end'});const j=await api('/api/replies',{topic:c.topic,title:c.title,text:c.body});if(!j.ok)return toast(j.error,1);toast('Searching for real replies…');tick()}
 async function loadReplies(){const j=await api('/api/replies');if(!j.replies)return;RL=j.replies;$('rpc').textContent=RL.length?RL.length+' saved':'';
  const lk=(u,t)=>'<a class=lnk href="'+esc(u)+'" target=_blank rel=noopener>'+esc(t||shortUrl(u))+'</a>';
  $('rlist').innerHTML=RL.length?RL.map((e,ei)=>'<div class=rent><div class=rh><b>'+esc(tname(e.topic))+' › '+esc(e.trend)+'</b><span class=meta>'+(e.status==='running'?'<span class=spin></span> searching X for real replies…':CT(e.ts)+(e.usage?' · '+fmtTok(e.usage.total||e.usage.in+e.usage.out)+' tok':''))+'</span><button class=sm onclick="copyR('+ei+')">⧉ Copy</button><button class="sm ghost" title="Delete" onclick="delR(\''+e.id+'\')">🗑</button></div>'
@@ -436,7 +544,7 @@ http.createServer(async (req, res) => {
     if (p === "/api/state" || p === "/api/status") return json(res, state());
     if (p === "/api/models") return json(res, { ok: true, models: await models() });
     if (p === "/api/diff") { const f = u.searchParams.get("f"); return goodFile(f) ? json(res, { ok: true, ...diffFor(f) }) : json(res, { ok: false, error: "Report not found." }, 404); }
-    if (p === "/api/summary") return json(res, { ok: true, columns: summary(), replies: replies.slice(0, 30), bluejay: BLUEJAY, generated: Date.now() });
+    if (p === "/api/summary") return json(res, { ok: true, columns: summary(), replies: replies.slice(0, 30), instagram: igPublic(), reach: settings.reach || "auto", bluejay: BLUEJAY, generated: Date.now() });
     if (p === "/api/replies" && !post) return json(res, { ok: true, replies, ver: repliesVer });
     if (p === "/api/reports") return json(res, { ok: true, reports: listReports((u.searchParams.get("q") || "").slice(0, 100)) });
     if (p === "/api/report") {
@@ -461,6 +569,8 @@ http.createServer(async (req, res) => {
       if (b.auto !== undefined || b.every !== undefined) arm();
       if (b.daily !== undefined) settings.daily = !!b.daily;
       if (b.dailyAt !== undefined) { if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(b.dailyAt)) return json(res, { ok: false, error: "Use a time like 06:00." }, 400); settings.dailyAt = b.dailyAt; }
+      if (b.reach !== undefined) { if (!["auto", "only", "off"].includes(b.reach)) return json(res, { ok: false, error: "Secondary source must be auto, only, or off." }, 400); settings.reach = b.reach; }
+      if (b.ig !== undefined) { try { settings.ig = parseHandleList(b.ig).join(","); } catch (e) { return json(res, { ok: false, error: e.message }, 400); } }
       saveSettings(); return json(res, { ok: true, settings });
     }
     if (p === "/api/topics") {
@@ -489,8 +599,12 @@ http.createServer(async (req, res) => {
         return json(res, { ok: true, text: r.toText().trim().replace(/^"(.*)"$/s, "$1") });
       } catch (e) { return json(res, { ok: false, error: (lastError = friendly(e)) }); }
     }
+    if (p === "/api/instagram") {
+      try { const ig = await refreshInstagram(true); return json(res, { ok: true, ...igPublic(), error: ig.error || "" }); }
+      catch (e) { return json(res, { ok: false, error: String(e.message || e).slice(0, 300) }); }
+    }
     if (p === "/api/replies") { // finds REAL existing replies; never writes or posts any
-      if (!getKey()) return json(res, { ok: false, error: "Enter your API key first." });
+      if (chooseBackend({ reach: settings.reach || "auto", hasKey: !!getKey() }) === "stop") return json(res, { ok: false, error: "Enter your API key first." });
       if (replies.filter((e) => e.status === "running").length >= 2) return json(res, { ok: false, error: "Two reply searches are already running. Wait for one to finish." });
       const title = clip(b.title, 300).trim(); if (!title) return json(res, { ok: false, error: "Missing trend." }, 400);
       const e = { id: "r" + Date.now().toString(36), ts: Date.now(), topic: clip(b.topic, 40), trend: title, status: "running", posts: [] };
