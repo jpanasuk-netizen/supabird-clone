@@ -3,6 +3,7 @@
 reports/
 usage.jsonl
 replies.json
+ig.json
 settings.json
 topics.json
 node_modules/

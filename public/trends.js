@@ -46,24 +46,35 @@
   const compose = (t) => (window.openCompose ? window.openCompose(t) : toast("Composer not loaded"));
 
   function trendText(tr) { return (tr.idea || tr.title).trim(); }
+  function igBlock() {
+    const ig = D.instagram || {}, acc = ig.accounts || [];
+    if (!acc.length && !ig.error) return "";
+    const row = (a) => {
+      const bits = [a.followers != null ? esc(a.followers) + " followers" : "", a.following != null ? esc(a.following) + " following" : "", a.postsCount != null ? esc(a.postsCount) + " posts" : ""].filter(Boolean).join(" · ");
+      const posts = (a.posts || []).slice(0, 3).map((p) => `<p class="bjt-why">${esc(p.text || "")}</p>`).join("");
+      return `<div class="bjt-tr"><b class="t">@${esc(a.username || "")}</b> <span class="bjt-tag ${a.backend === "jina" ? "FADING" : "NEW"}">${esc(a.backend || "")}</span><p class="bjt-why">${bits || "Counts not returned"}</p>${posts}</div>`;
+    };
+    return `<div class="card bjt-rp"><h3>Instagram</h3><p class="muted" style="font-size:13px">OpenCLI when the Chrome session is live. Jina Reader when Instagram rate-limits that session. ${ig.error ? esc(ig.error) : ""}</p>${acc.map(row).join("") || `<p class="muted">No profile rows.</p>`}</div>`;
+  }
   function replyText(e, x) { return "Re: " + e.trend + "\n\nReply target: " + x.url; }
 
   function draw(el) {
     const cols = D.columns || [], reps = D.replies || [];
     el.innerHTML = `
-      <div class="bjt-top"><h1>Trends</h1><span class="pill">from X Trends Desk · nothing posts from here</span>
+      <div class="bjt-top"><h1>Trends</h1><span class="pill">xAI when credits work · AgentReach otherwise · nothing posts from here</span>
         <button class="btn ghost" type="button" data-act="refresh">Refresh</button>
         <a class="btn ghost" href="${DESK}" target="_blank" rel="noopener">Open X Trends Desk</a>
         <span class="muted" style="font-size:12px">Updated ${CT(D.generated)}</span></div>
       <div class="bjt-cols">${cols.map((c, ci) => `
-        <div class="card bjt-col"><h3>${esc(c.name)} <small>${c.latest ? CT(c.latest.t) + (c.basis ? " · vs " + esc(c.basis) : "") : "not run yet"}</small></h3>
+        <div class="card bjt-col"><h3>${esc(c.name)} ${c.source && String(c.source).startsWith("reach") ? `<span class="bjt-tag NEW" title="${esc(c.source)}">AGENTREACH</span>` : ""} <small>${c.latest ? CT(c.latest.t) + (c.basis ? " · vs " + esc(c.basis) : "") : "not run yet"}</small></h3>
         ${c.trends.slice(0, 5).map((tr, ti) => `<div class="bjt-tr"><b class="t"><span class="bjt-rank">${tr.rank}</span>${esc(tr.title)}</b>${tr.tag && tr.tag !== "STEADY" ? `<span class="bjt-tag ${tr.tag}">${tr.tag}</span>` : ""}
           ${tr.why ? `<p class="bjt-why">${esc(tr.why)}</p>` : ""}${tr.idea ? `<p class="bjt-why"><b>Idea:</b> ${esc(tr.idea)}</p>` : ""}
           <div>${(tr.links || []).slice(0, 4).map((u) => lk(u)).join("")}</div>
           <div class="bjt-acts"><button class="btn" type="button" data-act="draft" data-c="${ci}" data-t="${ti}">Save as draft</button><button class="btn ghost" type="button" data-act="compose" data-c="${ci}" data-t="${ti}">Open in composer</button></div></div>`).join("") || `<p class="muted">No report yet.</p>`}
         ${c.fading && c.fading.length ? `<details class="bjt-fade"><summary>Fading (${c.fading.length})</summary><ul style="margin:6px 0 0 18px">${c.fading.map((f) => `<li>${esc(f.title)} · #${f.was}${f.now ? " → #" + f.now : " → gone"}</li>`).join("")}</ul></details>` : ""}
         </div>`).join("")}</div>
-      <div class="card bjt-rp"><h3>Replies</h3><p class="muted" style="font-size:13px">Real replies found by X Trends Desk (Grok X search), quoted verbatim. Open the links to confirm.</p>
+      ${igBlock()}
+      <div class="card bjt-rp"><h3>Replies</h3><p class="muted" style="font-size:13px">Real replies only, quoted verbatim. xAI when credits work. AgentReach (OpenCLI thread) when they do not. Open the links to confirm.</p>
       ${reps.length ? reps.map((e, ei) => `<div style="margin-top:14px"><b>${esc(e.trend)}</b> <span class="muted" style="font-size:12px">${CT(e.ts)}${e.status === "running" ? " · searching…" : ""}</span>
         ${e.status === "error" ? `<p class="warn">${esc(e.error)}</p>` : ""}
         ${e.status === "done" ? (e.posts.length ? `<div class="bjt-posts">${e.posts.map((p, pi) => `<div class="bjt-post"><div class="bjt-by">Original post ${lk(p.url, p.author)} ${esc(p.engagement)}</div>${p.text ? `<p style="font-size:13px;margin:4px 0">${esc(p.text)}</p>` : ""}
