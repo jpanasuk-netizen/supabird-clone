@@ -4,6 +4,7 @@
   "private": true,
   "description": "Blue Jay — local X growth lab on 127.0.0.1:3100",
   "scripts": {
-    "start": "node server.mjs"
+    "start": "node server.mjs",
+    "test": "node --test test/*.test.mjs"
   }
 }
