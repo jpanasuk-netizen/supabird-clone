@@ -6,7 +6,7 @@ import { SpaceXAI } from "@xai-official/sdk";
 import { xSearch } from "@xai-official/sdk/tools";
 
 const PORT = 3489, KEYFILE = ".xai-key", DIR = "reports", TOPICS_F = "topics.json", SET_F = "settings.json", USAGE_F = "usage.jsonl", REPLIES_F = "replies.json";
-const BLUEJAY = "http://127.0.0.1:3100";
+const BLUEJAY = "http://127.0.0.1:4747";
 mkdirSync(DIR, { recursive: true });
 const getKey = () => (existsSync(KEYFILE) ? readFileSync(KEYFILE, "utf8").trim() : "") || process.env.XAI_API_KEY || "";
 const keySource = () => (existsSync(KEYFILE) && readFileSync(KEYFILE, "utf8").trim() ? "file" : process.env.XAI_API_KEY ? "env" : "");
@@ -331,7 +331,7 @@ footer{display:flex;gap:18px;align-items:center;padding:6px 22px;border-top:1px 
 <label><input type=checkbox id=daily onchange="setS({daily:this.checked})"> Daily</label><input type=time id=dailyAt onchange="setS({dailyAt:this.value})">
 <label>Last <b id=last class=ok>—</b> · Next <b id=next>off</b></label></div>
 <div class=grp id=cost><label>Usage</label><span>last <b id=uLast>—</b></span><span>today <b id=uToday>—</b></span><span>total <b id=uTotal>—</b></span></div>
-<span class=sp></span><button class=sm onclick="muse()">📨 Send to Muse now</button><a id=bjl class="sm btnl" href="http://127.0.0.1:3100/#/trends" target=_blank rel=noopener><span class=dot id=bjdot></span><span id=bjt>Blue Jay</span></a><button class="sm pri" onclick="addDlg()">＋ Add column</button></header>
+<span class=sp></span><button class=sm onclick="muse()">📨 Send to Muse now</button><a id=bjl class="sm btnl" href="http://127.0.0.1:4747/#/trends" target=_blank rel=noopener><span class=dot id=bjdot></span><span id=bjt>Blue Jay</span></a><button class="sm pri" onclick="addDlg()">＋ Add column</button></header>
 <main><div id=cols></div>
 <aside><h2>🗂 Report history <span class=sp></span><span id=hcount class=meta></span></h2>
 <div class=tools><input id=q placeholder="Search reports (topic, words, @handle)…" oninput="clearTimeout(hist.t);hist.t=setTimeout(hist,250)"></div><ul id=hist></ul></aside>
@@ -340,7 +340,7 @@ footer{display:flex;gap:18px;align-items:center;padding:6px 22px;border-top:1px 
 <div id=ov onclick="if(event.target===this)closeDlg()"><div id=dlg><div class=hd><b id=dt></b><span id=da></span><button class="sm ghost" onclick="closeDlg()">✕</button></div><div class=bd id=db></div></div></div>
 <div id=toast></div>
 <script>
-let S={topics:[],runs:{},latest:{},settings:{}},shown={},cards=[],tkey='',first=1,RL=[],rVer=0,bjUp=false;const BJ='http://127.0.0.1:3100';
+let S={topics:[],runs:{},latest:{},settings:{}},shown={},cards=[],tkey='',first=1,RL=[],rVer=0,bjUp=false;const BJ='http://127.0.0.1:4747';
 const fmtTok=n=>n>=1e6?(n/1e6).toFixed(2)+'M':n>=1e3?(n/1e3).toFixed(1)+'k':String(n||0);
 const money=u=>u.api?' · $'+u.api.toFixed(u.api<1?4:2)+' API':u.est?' · ≈$'+u.est.toFixed(u.est<1?3:2)+' est':'';
 const IDEA=/^\s*[-*]\s*\**Idea\**:\**\s*(.+)$/mi;
