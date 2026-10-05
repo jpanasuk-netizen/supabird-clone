@@ -99,11 +99,14 @@ function queryString(query) {
 }
 
 export class HousexClient {
-  constructor({ apiKey = "", upstream = "", origin = "http://127.0.0.1:3100", fetchImpl = globalThis.fetch } = {}) {
+  constructor({ apiKey = "", upstream = "", origin = "http://127.0.0.1:3100", fetchImpl } = {}) {
     this.apiKey = String(apiKey || "").trim();
     this.upstream = String(upstream || "").trim();
     this.origin = origin;
-    this.fetchImpl = fetchImpl;
+    // Call fetch with the global this. Browsers throw Illegal invocation if the
+    // host function is detached and invoked as a method of this client.
+    const impl = fetchImpl || globalThis.fetch;
+    this.fetchImpl = (input, init) => impl.call(globalThis, input, init);
   }
 
   async call(method, path, { query, body, idempotencyKey } = {}) {

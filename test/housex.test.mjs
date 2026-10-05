@@ -58,6 +58,23 @@ test("classifier keeps 501, 401, and 429 as failures", () => {
   assert.deepEqual(ok.data, { id: "me" });
 });
 
+test("fetch keeps the global this so browsers accept it", async () => {
+  const client = new HousexClient({
+    apiKey: "hxk_test",
+    origin: "http://127.0.0.1:3100",
+    fetchImpl: function (url) {
+      if (this !== globalThis) throw new TypeError("Illegal invocation");
+      return new Response(JSON.stringify({ data: { id: "ok" } }), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      });
+    }
+  });
+  const result = await client.call("GET", "/me");
+  assert.equal(result.ok, true);
+  assert.equal(result.data.id, "ok");
+});
+
 test("auto-DM fields are stripped before a write", () => {
   assert.deepEqual(stripAutoDm({ text: "hi", auto_dm: { message: "secret" }, title: "t" }), { text: "hi", title: "t" });
 });
