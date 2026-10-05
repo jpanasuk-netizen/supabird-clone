@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import http from "node:http";
 import fs from "node:fs";
+import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { HousexClient, classifyHousexResponse, stripAutoDm } from "../public/housex-client.mjs";
 import {
   allowHousexBase,
@@ -61,7 +63,7 @@ test("classifier keeps 501, 401, and 429 as failures", () => {
 test("fetch keeps the global this so browsers accept it", async () => {
   const client = new HousexClient({
     apiKey: "hxk_test",
-    origin: "http://127.0.0.1:3100",
+    origin: "http://127.0.0.1:4747",
     fetchImpl: function (url) {
       if (this !== globalThis) throw new TypeError("Illegal invocation");
       return new Response(JSON.stringify({ data: { id: "ok" } }), {
@@ -153,6 +155,50 @@ test("proxy forwards bearer auth, passes 501 through, and refuses other hosts", 
     await close(proxy);
     await close(upstream);
   }
+});
+
+test("one Blue Jay desk stays on 4747 with HouseX and VYCE aligned", () => {
+  const retired = "31" + "00";
+  const root = fileURLToPath(new URL("..", import.meta.url));
+  const skip = new Set([".git", "node_modules", "data", ".venv"]);
+  const hits = [];
+  function walk(dir) {
+    for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (skip.has(ent.name)) continue;
+      const abs = path.join(dir, ent.name);
+      if (ent.isDirectory()) walk(abs);
+      else if (ent.isFile()) {
+        const text = fs.readFileSync(abs);
+        if (text.includes(retired)) hits.push(path.relative(root, abs));
+      }
+    }
+  }
+  walk(root);
+  assert.deepEqual(hits, []);
+
+  const desk = "http://127.0.0.1:4747/#/housex";
+  const api = "http://127.0.0.1:8787/v1";
+  const readme = fs.readFileSync(path.join(root, "README.md"), "utf8");
+  const start = fs.readFileSync(path.join(root, "start.cmd"), "utf8");
+  const env = fs.readFileSync(path.join(root, ".env.example"), "utf8");
+  const server = fs.readFileSync(path.join(root, "server.mjs"), "utf8");
+  const app = fs.readFileSync(path.join(root, "public", "app.js"), "utf8");
+  const index = fs.readFileSync(path.join(root, "public", "index.html"), "utf8");
+  assert.match(readme, new RegExp(desk.replace(/[.]/g, "\\.")));
+  assert.match(readme, new RegExp(api.replace(/[.]/g, "\\.")));
+  assert.match(readme, /HOUSEX_API_URL/);
+  assert.match(readme, /gpt-6-luna/);
+  assert.match(start, new RegExp(desk.replace(/[.]/g, "\\.")));
+  assert.match(start, new RegExp(api.replace(/[.]/g, "\\.")));
+  assert.match(env, /HOUSEX_API_URL=http:\/\/127\.0\.0\.1:8787\/v1/);
+  assert.match(env, /VYCE gpt-6-luna/);
+  assert.match(server, /const PORT = 4747/);
+  assert.match(server, /const VYCE_MODEL = "gpt-6-luna"/);
+  assert.match(server, /HOUSEX_API_URL/);
+  assert.match(app, /view === "housex"/);
+  assert.match(app, /VYCE · gpt-6-luna/);
+  assert.match(index, /housex\.js/);
+  assert.doesNotMatch(readme + start + env + server + app, new RegExp(retired));
 });
 
 test("desk UI does not name or call the hosted product", () => {

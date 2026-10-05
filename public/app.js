@@ -31,7 +31,8 @@ const EMPTY = {
     provider: "fcc",
     customBase: "",
     customModel: "",
-    customKey: ""
+    customKey: "",
+    vyceKey: ""
   }
 };
 
@@ -45,18 +46,26 @@ function load() {
 }
 function save(next) { localStorage.setItem(KEY, JSON.stringify(next)); return next; }
 
+function providerName(value) {
+  if (value === "custom" || value === "vyce") return value;
+  return "fcc";
+}
+
 function providerPayload() {
   const s = state.settings || EMPTY.settings;
-  const provider = s.provider === "custom" ? "custom" : "fcc";
-  if (provider !== "custom") return { provider };
-  return {
-    provider,
-    custom: {
-      baseUrl: s.customBase,
-      model: s.customModel,
-      apiKey: s.customKey
-    }
-  };
+  const provider = providerName(s.provider);
+  if (provider === "custom") {
+    return {
+      provider,
+      custom: {
+        baseUrl: s.customBase,
+        model: s.customModel,
+        apiKey: s.customKey
+      }
+    };
+  }
+  if (provider === "vyce") return { provider, vyce: { apiKey: s.vyceKey } };
+  return { provider };
 }
 
 async function generateFromProxy(payload) {
@@ -82,7 +91,7 @@ function setBusy(form, on, msg) {
     form.appendChild(n);
   }
   n.className = on ? "muted" : (msg && msg.startsWith("FCC") || (msg && msg.toLowerCase().includes("fail")) || (msg && msg.toLowerCase().includes("error")) || (msg && msg.toLowerCase().includes("timeout")) ? "warn" : "ok");
-  if (!on && msg && /fcc|fail|error|timeout|unreachable|empty/i.test(msg)) n.className = "warn";
+  if (!on && msg && /fcc|fail|error|timeout|unreachable|empty|not set/i.test(msg)) n.className = "warn";
   n.textContent = on ? "Calling the selected model…" : (msg || "");
 }
 
@@ -193,14 +202,14 @@ function landing() {
   return `
     <header class="topnav"><div class="brand">Blue Jay</div><nav class="row"><a href="#/dashboard">App</a></nav></header>
     <section class="hero">
-      <p class="pill">Blue Jay · v1.1 · local · 127.0.0.1:3100</p>
+      <p class="pill">Blue Jay · v1.1 · local · 127.0.0.1:4747</p>
       <h1>Blue Jay — AI-powered growth for X<br /><span>that stays on this machine</span></h1>
       <p>Find an idea, rewrite it in your voice, queue it, keep the library. Writes use Settings: bundled Free Claude Code (Sonnet 4.6) or a custom OpenAI-compatible API. Generate never tweets.</p>
       <div class="row" style="justify-content:center">
         <a class="btn" href="#/dashboard">Open the lab</a>
         <a class="btn ghost" href="#/dashboard" id="hero-x-login">Enable posting / tweet sync</a>
       </div>
-      <p class="muted" style="margin-top:12px">Profile can load from Cursor X. Posting needs Native Sign in with X while this lab stays up at :3100.</p>
+      <p class="muted" style="margin-top:12px">Profile can load from Cursor X. Posting needs Native Sign in with X while this lab stays up at :4747.</p>
     </section>
     <div class="wrap grid3">
       <div class="card"><h3>IdeasLab</h3><p>A swipe file instead of a blank page.</p></div>
@@ -452,7 +461,7 @@ function render() {
     }
     root.innerHTML = shell(`
       <h1>Enable posting / tweet sync</h1>
-      <p class="muted">Plugin profile stays on the dashboard. This panel only starts Native Sign in with X while the lab is up at :3100.</p>
+      <p class="muted">Plugin profile stays on the dashboard. This panel only starts Native Sign in with X while the lab is up at :4747.</p>
       <p id="x-banner" class="${err ? "warn" : "muted"}">${esc(err || "Ready. Click Enable posting — same window, so X can send errors back here.")}</p>
       ${xErrCode && xErrCode !== err ? `<p class="warn">X error code: <code>${esc(xErrCode)}</code></p>` : ""}
       <div class="row" style="margin:16px 0">
@@ -461,13 +470,13 @@ function render() {
       </div>
       <div class="card stack" style="margin-top:16px">
         <h3>Callback URL (paste this exactly on developer.x.com)</h3>
-        <p><code id="cb-str">http://127.0.0.1:3100/callback/x</code>
+        <p><code id="cb-str">http://127.0.0.1:4747/callback/x</code>
           <button class="btn ghost" type="button" id="copy-cb">Copy</button></p>
         <ul class="muted" style="margin:8px 0 0 18px">
           <li>User authentication settings: ON</li>
           <li>Type of App: <b>Native App</b> (public client, PKCE). Do not pick Confidential / Web unless you also paste a Client secret below.</li>
-          <li>Callback URI / Redirect URL: exactly <code>http://127.0.0.1:3100/callback/x</code> — not localhost, no slash at the end, http not https</li>
-          <li>Website URL can be <code>http://127.0.0.1:3100</code></li>
+          <li>Callback URI / Redirect URL: exactly <code>http://127.0.0.1:4747/callback/x</code> — not localhost, no slash at the end, http not https</li>
+          <li>Website URL can be <code>http://127.0.0.1:4747</code></li>
           <li>Core scopes we request: <code>tweet.read tweet.write users.read offline.access</code> — enable those on the app. Extra scopes stay off until login works.</li>
         </ul>
       </div>
@@ -485,7 +494,7 @@ function render() {
     bindSignIn("#do-x-login");
     const copy = root.querySelector("#copy-cb");
     if (copy) copy.onclick = () => {
-      navigator.clipboard.writeText("http://127.0.0.1:3100/callback/x").catch(() => {});
+      navigator.clipboard.writeText("http://127.0.0.1:4747/callback/x").catch(() => {});
       copy.textContent = "Copied";
     };
     fetch("/api/x/status").then((r) => r.json()).then((x) => {
@@ -847,14 +856,18 @@ function render() {
     const s = state.settings || EMPTY.settings;
     root.innerHTML = shell(`
       <h1>Settings</h1>
-      <p class="muted">Pick who writes. Builtin FCC auto-updates on start. Custom is OpenAI-compatible. Nothing is posted.</p>
+      <p class="muted">Pick who writes. Free Claude Code is the default. VYCE gpt-6-luna is used when a VYCE key is set. Custom is any other OpenAI-compatible API. Nothing is posted.</p>
       <p id="fcc-status" class="muted">Checking bundled FCC…</p>
       <form class="card stack" id="f" style="margin-top:16px">
         <label>Provider</label>
         <select name="provider">
-          <option value="fcc"${s.provider !== "custom" ? " selected" : ""}>Builtin Free Claude Code (Sonnet 4.6)</option>
-          <option value="custom"${s.provider === "custom" ? " selected" : ""}>Custom OpenAI-compatible API</option>
+          <option value="fcc"${providerName(s.provider) === "fcc" ? " selected" : ""}>Builtin Free Claude Code (Sonnet 4.6)</option>
+          <option value="vyce"${providerName(s.provider) === "vyce" ? " selected" : ""}>VYCE · gpt-6-luna</option>
+          <option value="custom"${providerName(s.provider) === "custom" ? " selected" : ""}>Custom OpenAI-compatible API</option>
         </select>
+        <label>VYCE API key</label>
+        <input name="vyceKey" type="password" autocomplete="off" value="${esc(s.vyceKey || "")}" />
+        <p class="muted">VYCE gpt-6-luna for AI when this key is set. The model id is fixed. The key is stored in gitignored .env.local.</p>
         <label>Custom base URL</label>
         <input name="customBase" placeholder="http://127.0.0.1:8781/v1" value="${esc(s.customBase)}" />
         <label>Custom model id</label>
@@ -874,7 +887,7 @@ function render() {
         <p id="xnote"></p>
         <details id="x-once" style="margin-top:12px">
           <summary class="muted">First-run Client ID (only if Sign in cannot start)</summary>
-          <p class="muted">Native app at developer.x.com. Callback http://127.0.0.1:3100/callback/x. PKCE. Secret optional. Saved to gitignored data/.</p>
+          <p class="muted">Native app at developer.x.com. Callback http://127.0.0.1:4747/callback/x. PKCE. Secret optional. Saved to gitignored data/.</p>
           <label>Client ID</label><input name="clientId" autocomplete="off" />
           <label>Client secret (optional)</label><input name="clientSecret" type="password" autocomplete="off" />
           <button class="btn ghost" type="submit">Save X app</button>
@@ -896,10 +909,11 @@ function render() {
       const form = e.target;
       const fd = new FormData(form);
       const next = {
-        provider: String(fd.get("provider") || "fcc") === "custom" ? "custom" : "fcc",
+        provider: providerName(String(fd.get("provider") || "fcc")),
         customBase: String(fd.get("customBase") || "").trim(),
         customModel: String(fd.get("customModel") || "").trim(),
-        customKey: String(fd.get("customKey") || "")
+        customKey: String(fd.get("customKey") || ""),
+        vyceKey: String(fd.get("vyceKey") || "")
       };
       state = save({ ...state, settings: next });
       setBusy(form, true);
@@ -913,7 +927,10 @@ function render() {
         if (!r.ok) throw new Error(data.error || `Settings HTTP ${r.status}`);
         const echoed = data.settings || {};
         if (echoed.provider !== next.provider) throw new Error("Settings did not round-trip provider");
-        setBusy(form, false, `Saved ${next.provider}${echoed.hasCustomKey ? " · key kept locally" : ""}`);
+        const keyNote = next.provider === "vyce"
+          ? (echoed.hasVyceKey ? " · gpt-6-luna · key kept locally" : "")
+          : (echoed.hasCustomKey ? " · key kept locally" : "");
+        setBusy(form, false, `Saved ${next.provider}${keyNote}`);
       } catch (err) {
         setBusy(form, false, String(err.message || err));
       }

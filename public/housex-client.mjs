@@ -99,7 +99,7 @@ function queryString(query) {
 }
 
 export class HousexClient {
-  constructor({ apiKey = "", upstream = "", origin = "http://127.0.0.1:3100", fetchImpl } = {}) {
+  constructor({ apiKey = "", upstream = "", origin = "http://127.0.0.1:4747", fetchImpl } = {}) {
     this.apiKey = String(apiKey || "").trim();
     this.upstream = String(upstream || "").trim();
     this.origin = origin;
