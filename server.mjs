@@ -545,7 +545,10 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(404, { "content-type": "text/plain" }).end("not found");
       return;
     }
-    res.writeHead(200, { "content-type": TYPES[path.extname(abs)] || "application/octet-stream" }).end(buf);
+    const type = TYPES[path.extname(abs)] || "application/octet-stream";
+    const headers = { "content-type": type };
+    if (abs.endsWith(".js") || abs.endsWith(".html")) headers["cache-control"] = "no-store";
+    res.writeHead(200, headers).end(buf);
   });
 });
 

@@ -281,6 +281,13 @@ function statCell(value, status, label, blocked) {
   return `<div class="stat"><b>${live ? dash(value) : "—"}</b><span class="muted">${esc(caption || label)}</span></div>`;
 }
 
+function profileStrip(s) {
+  const p = s.profile || {};
+  const handle = p.username || (s.x && (s.x.username || s.x.expectedUsername)) || "";
+  const when = p.capturedAt ? "Profile refreshed " + p.capturedAt : "Profile not refreshed yet";
+  return `<div class="card" id="x-profile" style="margin-bottom:16px"><h3>${esc(p.name || "X profile")}${handle ? " · @" + esc(handle) : ""}</h3><p class="muted" id="x-profile-when">${esc(when)}</p>${p.description ? `<p>${esc(p.description)}</p>` : ""}</div>`;
+}
+
 function liveHtml(s, lastSync) {
   const t = s.totals || {};
   const w = s.week || {};
@@ -295,6 +302,7 @@ function liveHtml(s, lastSync) {
     .join("");
   const recent = (s.recent || []).filter((p) => p.status === "posted" && p.id);
   return `
+    ${profileStrip(s)}
     <div class="grid4" style="margin:18px 0">
       <div class="stat"><b>${dash(s.followers)}</b><span class="muted">Followers ${s.followerDelta == null ? "" : "(" + (s.followerDelta > 0 ? "+" : "") + s.followerDelta + ")"}</span></div>
       <div class="stat"><b>${dash(s.following)}</b><span class="muted">Following</span></div>
@@ -344,7 +352,9 @@ function liveHtml(s, lastSync) {
     </div>`;
 }
 
+let liveGen = 0;
 async function fillLive(opts) {
+  const gen = ++liveGen;
   const note = root.querySelector("#sync-note");
   const clock = root.querySelector("#sync-clock");
   const live = root.querySelector("#live");
@@ -359,14 +369,19 @@ async function fillLive(opts) {
   } catch {
     xStatus = {};
   }
+  if (gen !== liveGen) return;
   const canOfficial = appOAuth(xStatus);
-  if (syncing && !canOfficial) {
+  if (wantRefresh) {
+    note.textContent = "Refreshing signed-in profile…";
+  } else if (syncing && !canOfficial) {
     note.textContent = "Plugin profile only — official tweet sync waits for Native Sign in.";
   } else if (syncing) {
     note.textContent = "Syncing your X… official API ingest after sign-in.";
     for (let i = 0; i < 45; i++) {
+      if (gen !== liveGen) return;
       try {
         const st = await fetch("/api/x/ingest").then((r) => r.json());
+        if (gen !== liveGen) return;
         note.textContent = st.inFlight
           ? "Syncing your X… " + (st.pending ? "queued " + st.pending : "")
           : "Sync finished.";
@@ -387,23 +402,30 @@ async function fillLive(opts) {
       await new Promise((r) => setTimeout(r, 1000));
     }
   } else {
-    note.textContent = wantRefresh && canOfficial ? "Calling official X API…" : "Loading saved X world…";
+    note.textContent = "Loading saved X world…";
   }
+  if (gen !== liveGen) return;
   try {
-    const r = await fetch(wantRefresh && canOfficial ? "/api/x/stats?refresh=1" : "/api/x/stats");
+    const r = await fetch(wantRefresh ? "/api/x/stats?refresh=1" : "/api/x/stats");
     const data = await r.json();
+    if (gen !== liveGen) return;
     const summary = data.summary || {};
     const last = data.lastSync || summary.lastSync;
     const ingest = data.ingest || {};
+    const profile = summary.profile || {};
+    const bannerX = { ...(summary.x || xStatus) };
+    if (profile.username) bannerX.username = profile.username;
+    if (profile.id) bannerX.userId = profile.id;
+    paintSessionBanner(bannerX, root.querySelector("#x-banner"), root.querySelector("#dash-x-login"));
     if (!r.ok) {
       note.className = "warn";
       note.textContent = data.error || `Sync HTTP ${r.status}`;
     } else {
       note.className = last && last.ok === false && last.error && !/missing valid authorization|not signed in/i.test(String(last.error)) ? "warn" : "ok";
-      const who = appOAuth(summary.x || xStatus)
-        ? "@" + ((summary.x && summary.x.username) || "user") + " (app OAuth)"
-        : pluginConnected(summary.x || xStatus, summary)
-          ? "@" + ((summary.profile && summary.profile.username) || (summary.x && summary.x.username) || "Jasper_Black") + " · plugin profile only"
+      const who = appOAuth(bannerX)
+        ? "@" + (bannerX.username || "user") + " (app OAuth)"
+        : pluginConnected(bannerX, summary)
+          ? "@" + (profile.username || bannerX.username || "Jasper_Black") + " · plugin profile only"
           : "no X profile yet";
       const skip = last && last.skipped ? "official ingest idle" : (last && last.reason ? last.reason : "no reason");
       note.textContent = `${who} · last ${last && last.at ? last.at : "never"} · ${skip}`;
@@ -420,6 +442,7 @@ async function fillLive(opts) {
       btn.onclick = () => openCompose(btn.getAttribute("data-compose"));
     });
   } catch (err) {
+    if (gen !== liveGen) return;
     note.className = "warn";
     note.textContent = String(err.message || err);
   }
@@ -544,7 +567,7 @@ function render() {
     }
     fillLive({ refresh: false, syncing: hashParts().q.get("syncing") === "1" });
     const btn = root.querySelector("#x-refresh");
-    if (btn) btn.onclick = () => fillLive({ refresh: true });
+    if (btn) btn.onclick = () => { btn.disabled = true; fillLive({ refresh: true }).finally(() => { btn.disabled = false; }); };
     fetch("/api/x/status").then((r) => r.json()).then((x) => {
       paintSessionBanner(x, root.querySelector("#x-banner"), root.querySelector("#dash-x-login"));
     }).catch((e) => {
