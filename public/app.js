@@ -204,7 +204,7 @@ function landing() {
     <section class="hero">
       <p class="pill">Blue Jay · v1.1 · local · 127.0.0.1:4747</p>
       <h1>Blue Jay — AI-powered growth for X<br /><span>that stays on this machine</span></h1>
-      <p>Find an idea, rewrite it in your voice, queue it, keep the library. Writes use Settings: bundled Free Claude Code (Sonnet 4.6) or a custom OpenAI-compatible API. Generate never tweets.</p>
+      <p>Find an idea, rewrite it in your voice, queue it, keep the library. Writes use Settings: bundled Free Claude Code, VYCE gpt-6-luna when a key is set, or a custom OpenAI-compatible API. Generate never tweets. HouseX is a panel in this desk.</p>
       <div class="row" style="justify-content:center">
         <a class="btn" href="#/dashboard">Open the lab</a>
         <a class="btn ghost" href="#/dashboard" id="hero-x-login">Enable posting / tweet sync</a>
