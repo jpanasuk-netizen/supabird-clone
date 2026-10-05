@@ -193,14 +193,14 @@ function landing() {
   return `
     <header class="topnav"><div class="brand">Blue Jay</div><nav class="row"><a href="#/dashboard">App</a></nav></header>
     <section class="hero">
-      <p class="pill">Blue Jay · v1.1 · local · 127.0.0.1:3100</p>
+      <p class="pill">Blue Jay · v1.1 · local · 127.0.0.1:4747</p>
       <h1>Blue Jay — AI-powered growth for X<br /><span>that stays on this machine</span></h1>
       <p>Find an idea, rewrite it in your voice, queue it, keep the library. Writes use Settings: bundled Free Claude Code (Sonnet 4.6) or a custom OpenAI-compatible API. Generate never tweets.</p>
       <div class="row" style="justify-content:center">
         <a class="btn" href="#/dashboard">Open the lab</a>
         <a class="btn ghost" href="#/dashboard" id="hero-x-login">Enable posting / tweet sync</a>
       </div>
-      <p class="muted" style="margin-top:12px">Profile can load from Cursor X. Posting needs Native Sign in with X while this lab stays up at :3100.</p>
+      <p class="muted" style="margin-top:12px">Profile can load from Cursor X. Posting needs Native Sign in with X while this lab stays up at :4747.</p>
     </section>
     <div class="wrap grid3">
       <div class="card"><h3>IdeasLab</h3><p>A swipe file instead of a blank page.</p></div>
@@ -452,7 +452,7 @@ function render() {
     }
     root.innerHTML = shell(`
       <h1>Enable posting / tweet sync</h1>
-      <p class="muted">Plugin profile stays on the dashboard. This panel only starts Native Sign in with X while the lab is up at :3100.</p>
+      <p class="muted">Plugin profile stays on the dashboard. This panel only starts Native Sign in with X while the lab is up at :4747.</p>
       <p id="x-banner" class="${err ? "warn" : "muted"}">${esc(err || "Ready. Click Enable posting — same window, so X can send errors back here.")}</p>
       ${xErrCode && xErrCode !== err ? `<p class="warn">X error code: <code>${esc(xErrCode)}</code></p>` : ""}
       <div class="row" style="margin:16px 0">
@@ -461,13 +461,13 @@ function render() {
       </div>
       <div class="card stack" style="margin-top:16px">
         <h3>Callback URL (paste this exactly on developer.x.com)</h3>
-        <p><code id="cb-str">http://127.0.0.1:3100/callback/x</code>
+        <p><code id="cb-str">http://127.0.0.1:4747/callback/x</code>
           <button class="btn ghost" type="button" id="copy-cb">Copy</button></p>
         <ul class="muted" style="margin:8px 0 0 18px">
           <li>User authentication settings: ON</li>
           <li>Type of App: <b>Native App</b> (public client, PKCE). Do not pick Confidential / Web unless you also paste a Client secret below.</li>
-          <li>Callback URI / Redirect URL: exactly <code>http://127.0.0.1:3100/callback/x</code> — not localhost, no slash at the end, http not https</li>
-          <li>Website URL can be <code>http://127.0.0.1:3100</code></li>
+          <li>Callback URI / Redirect URL: exactly <code>http://127.0.0.1:4747/callback/x</code> — not localhost, no slash at the end, http not https</li>
+          <li>Website URL can be <code>http://127.0.0.1:4747</code></li>
           <li>Core scopes we request: <code>tweet.read tweet.write users.read offline.access</code> — enable those on the app. Extra scopes stay off until login works.</li>
         </ul>
       </div>
@@ -485,7 +485,7 @@ function render() {
     bindSignIn("#do-x-login");
     const copy = root.querySelector("#copy-cb");
     if (copy) copy.onclick = () => {
-      navigator.clipboard.writeText("http://127.0.0.1:3100/callback/x").catch(() => {});
+      navigator.clipboard.writeText("http://127.0.0.1:4747/callback/x").catch(() => {});
       copy.textContent = "Copied";
     };
     fetch("/api/x/status").then((r) => r.json()).then((x) => {
@@ -874,7 +874,7 @@ function render() {
         <p id="xnote"></p>
         <details id="x-once" style="margin-top:12px">
           <summary class="muted">First-run Client ID (only if Sign in cannot start)</summary>
-          <p class="muted">Native app at developer.x.com. Callback http://127.0.0.1:3100/callback/x. PKCE. Secret optional. Saved to gitignored data/.</p>
+          <p class="muted">Native app at developer.x.com. Callback http://127.0.0.1:4747/callback/x. PKCE. Secret optional. Saved to gitignored data/.</p>
           <label>Client ID</label><input name="clientId" autocomplete="off" />
           <label>Client secret (optional)</label><input name="clientSecret" type="password" autocomplete="off" />
           <button class="btn ghost" type="submit">Save X app</button>

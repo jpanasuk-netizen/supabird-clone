@@ -1,4 +1,4 @@
-// Zero-dep static + generate proxy. Binds 127.0.0.1:3100 only.
+// Zero-dep static + generate proxy. Binds 127.0.0.1:4747 only.
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
@@ -32,7 +32,7 @@ loadDotEnv(path.join(ROOT, ".env"));
 loadDotEnv(path.join(ROOT, ".env.local"));
 
 const HOST = "127.0.0.1";
-const PORT = 3100;
+const PORT = 4747;
 const TYPES = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
