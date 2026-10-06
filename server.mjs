@@ -25,7 +25,6 @@ import {
 } from "./x-sync.mjs";
 import { armIngestTimer, ingestStatus, runIngest } from "./x-ingest.mjs";
 import { fileURLToPath } from "node:url";
-import { handleHousexProxy, isHousexProxyPath, resolveHousexBase } from "./housex-proxy.mjs";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 loadDotEnv(path.join(ROOT, ".env"));
@@ -338,10 +337,6 @@ const server = http.createServer(async (req, res) => {
       return;
     }
   }
-  if (isHousexProxyPath(url.pathname)) {
-    await handleHousexProxy(req, res, url);
-    return;
-  }
   if (req.method === "GET" && url.pathname === "/api/trends/summary") {
     try {
       const r = await fetch(TRENDS_DESK + "/api/summary", { signal: AbortSignal.timeout(4000) });
@@ -376,8 +371,7 @@ const server = http.createServer(async (req, res) => {
       fccVersion: ver.version,
       fccCommit: ver.commit,
       fccUpdate: fccUpdateStatus(),
-      xIngest: ingestStatus(ROOT),
-      housex: resolveHousexBase("", process.env.HOUSEX_API_URL)
+      xIngest: ingestStatus(ROOT)
     });
     return;
   }

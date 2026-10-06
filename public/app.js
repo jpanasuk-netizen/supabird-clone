@@ -1,7 +1,6 @@
 const KEY = "supabird-local-v1";
 const LINKS = [
   ["dashboard", "Dashboard"],
-  ["housex", "HouseX"],
   ["stats", "Stats"],
   ["ideas", "IdeasLab"],
   ["x-gpt", "X-GPT"],
@@ -963,12 +962,6 @@ function render() {
         if (note) { note.className = "warn"; note.textContent = String(err.message || err); }
       }
     };
-    return;
-  }
-
-  if (view === "housex" || view.startsWith("housex/")) {
-    root.innerHTML = shell(`<div id="bj-housex"></div>`);
-    if (window.renderHouseX) window.renderHouseX(root.querySelector("#bj-housex"));
     return;
   }
 

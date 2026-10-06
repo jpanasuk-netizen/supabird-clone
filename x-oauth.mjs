@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-const AUTH = "https://twitter.com/i/oauth2/authorize";
+const AUTH = "https://x.com/i/oauth2/authorize";
 const TOKEN = "https://api.twitter.com/2/oauth2/token";
 const TWEETS = "https://api.twitter.com/2/tweets";
 const ME = "https://api.twitter.com/2/users/me";
@@ -10,7 +10,7 @@ const MEDIA = "https://api.x.com/2/media/upload";
 const MEDIA_INIT = "https://api.x.com/2/media/upload/initialize";
 const MEDIA_META = "https://api.x.com/2/media/metadata";
 const MEDIA_META_V1 = "https://api.twitter.com/1.1/media/metadata/create.json";
-export const CALLBACK = "http://127.0.0.1:3100/callback/x";
+export const CALLBACK = "http://127.0.0.1:4747/callback/x";
 /** Minimum for ingest + text post. Extra scopes fail authorize if the X app does not have them. */
 export const CORE_SCOPES = ["tweet.read", "tweet.write", "users.read", "offline.access"];
 export const EXTRA_SCOPES = ["media.write", "like.read", "bookmark.read", "list.read", "follows.read"];
@@ -134,7 +134,7 @@ export function xPublicStatus(store) {
     extraScopes: Array.isArray(store.extraScopes) ? store.extraScopes : [],
     lastAuthorize: store.lastAuthorize || null,
     signInPath: "/api/x/login",
-    labUrl: "http://127.0.0.1:3100/#/dashboard"
+    labUrl: "http://127.0.0.1:4747/#/dashboard"
   };
 }
 
@@ -204,7 +204,7 @@ export function beginLogin(root) {
   const store = loadXStore(root);
   if (!store.clientId) {
     throw new Error(
-      "Need an X Client ID once. At developer.x.com create a Native app (PKCE). Callback URL must be exactly http://127.0.0.1:3100/callback/x. Paste the Client ID in the sign-in panel — this machine remembers it. Client secret is optional for Native."
+      "Need an X Client ID once. At developer.x.com create a Native app (PKCE). Callback URL must be exactly http://127.0.0.1:4747/callback/x. Paste the Client ID in the sign-in panel — this machine remembers it. Client secret is optional for Native."
     );
   }
   const verifier = b64url(crypto.randomBytes(32));
@@ -285,7 +285,7 @@ export async function finishLogin(root, query) {
     throw new Error("Sign-in session expired (PKCE verifier missing). Click Sign in with X once more without restarting the lab.");
   }
   if (state !== pending.state) {
-    throw new Error("X sign-in state mismatch. Click Enable posting / tweet sync again from http://127.0.0.1:3100/#/dashboard.");
+    throw new Error("X sign-in state mismatch. Click Enable posting / tweet sync again from http://127.0.0.1:4747/#/dashboard.");
   }
   if (!code) throw new Error("X sign-in returned no code.");
   const body = new URLSearchParams({
