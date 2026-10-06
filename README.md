@@ -1,6 +1,6 @@
 # Blue Jay — local X growth lab
 
-**Blue Jay** is a local command center for X: profile, drafts, generate, and optional Native posting. It binds **http://127.0.0.1:4747** only. Never `:3000`. The GitHub folder may still be `supabird-clone`; the product name on screen is Blue Jay.
+**Blue Jay** is one local desk: profile, drafts, generate, Trends, and optional Native posting. It binds **http://127.0.0.1:4747** only. Never `:3000`. The GitHub folder may still be `supabird-clone`; the product name on screen is Blue Jay.
 
 Generate does not tweet. Missing metrics stay blank or “not pulled” — never invented zeros.
 
@@ -14,20 +14,15 @@ start.cmd
 
 Then open **http://127.0.0.1:4747**. `start.cmd` tries to spawn house Free Claude Code and runs `node server.mjs`.
 
-## HouseX desk
+| Piece | Where |
+| --- | --- |
+| Blue Jay desk | http://127.0.0.1:4747 |
+| Trends | http://127.0.0.1:4747/#/trends (fed by X Trends Desk on :3489) |
+| AI | VYCE `gpt-6-luna` when a VYCE key is set. Otherwise local Free Claude Code. |
 
-HouseX is a panel in this same Blue Jay shell (sidebar entry **HouseX**), not a separate site. It reads and writes a local HouseX API. The browser stores the API key in `localStorage` only. Blue Jay forwards `Authorization` to the loopback API and does not write the key to disk.
+## AI
 
-1. Start the HouseX API so it listens on **http://127.0.0.1:8787/v1**.
-2. Start Blue Jay (`start.cmd` or `node server.mjs`) at **http://127.0.0.1:4747**.
-3. Open **http://127.0.0.1:4747/#/housex**.
-4. In HouseX → Settings, set the API URL if it is not the default, paste an `hxk_…` key, and run **Test connection**.
-
-`HOUSEX_API_URL` in `.env.local` (see `.env.example`) overrides the proxy target. The default is `http://127.0.0.1:8787/v1`. This app is not Vite, so there is no `VITE_HOUSEX_API_URL`. The browser calls same-origin `/api/housex/…`, which Blue Jay proxies, so a cross-origin block on `:8787` does not matter.
-
-A HouseX HTTP **501** (or `not_implemented`) shows a **not implemented** chip and does not render stand-in data. Drafts stay drafts until you confirm a schedule or an immediate publish. This desk does not send DMs, and it will not proxy any host except loopback HTTP.
-
-Copy `.env.example` to `.env.local` if you want a custom OpenAI-compatible writer. Default generate uses local FCC.
+Default generate uses local Free Claude Code. In Blue Jay → Settings, choose **VYCE · gpt-6-luna** and save a VYCE API key. That key lives in gitignored `.env.local` as `VYCE_API_KEY`. With the key set, generate calls VYCE model `gpt-6-luna`. With no key, generate stays on FCC and a VYCE save is refused. Generate never tweets.
 
 ## FCC (local 8080)
 

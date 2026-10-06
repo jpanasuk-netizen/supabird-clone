@@ -30,7 +30,8 @@ const EMPTY = {
     provider: "fcc",
     customBase: "",
     customModel: "",
-    customKey: ""
+    customKey: "",
+    vyceKey: ""
   }
 };
 
@@ -44,18 +45,26 @@ function load() {
 }
 function save(next) { localStorage.setItem(KEY, JSON.stringify(next)); return next; }
 
+function providerName(value) {
+  if (value === "custom" || value === "vyce") return value;
+  return "fcc";
+}
+
 function providerPayload() {
   const s = state.settings || EMPTY.settings;
-  const provider = s.provider === "custom" ? "custom" : "fcc";
-  if (provider !== "custom") return { provider };
-  return {
-    provider,
-    custom: {
-      baseUrl: s.customBase,
-      model: s.customModel,
-      apiKey: s.customKey
-    }
-  };
+  const provider = providerName(s.provider);
+  if (provider === "custom") {
+    return {
+      provider,
+      custom: {
+        baseUrl: s.customBase,
+        model: s.customModel,
+        apiKey: s.customKey
+      }
+    };
+  }
+  if (provider === "vyce") return { provider, vyce: { apiKey: s.vyceKey } };
+  return { provider };
 }
 
 async function generateFromProxy(payload) {
@@ -81,7 +90,7 @@ function setBusy(form, on, msg) {
     form.appendChild(n);
   }
   n.className = on ? "muted" : (msg && msg.startsWith("FCC") || (msg && msg.toLowerCase().includes("fail")) || (msg && msg.toLowerCase().includes("error")) || (msg && msg.toLowerCase().includes("timeout")) ? "warn" : "ok");
-  if (!on && msg && /fcc|fail|error|timeout|unreachable|empty/i.test(msg)) n.className = "warn";
+  if (!on && msg && /fcc|fail|error|timeout|unreachable|empty|not set/i.test(msg)) n.className = "warn";
   n.textContent = on ? "Calling the selected model…" : (msg || "");
 }
 
@@ -194,7 +203,7 @@ function landing() {
     <section class="hero">
       <p class="pill">Blue Jay · v1.1 · local · 127.0.0.1:4747</p>
       <h1>Blue Jay — AI-powered growth for X<br /><span>that stays on this machine</span></h1>
-      <p>Find an idea, rewrite it in your voice, queue it, keep the library. Writes use Settings: bundled Free Claude Code (Sonnet 4.6) or a custom OpenAI-compatible API. Generate never tweets.</p>
+      <p>Find an idea, rewrite it in your voice, queue it, keep the library. Writes use Settings: bundled Free Claude Code, VYCE gpt-6-luna when a key is set, or a custom OpenAI-compatible API. Generate never tweets.</p>
       <div class="row" style="justify-content:center">
         <a class="btn" href="#/dashboard">Open the lab</a>
         <a class="btn ghost" href="#/dashboard" id="hero-x-login">Enable posting / tweet sync</a>
@@ -846,14 +855,18 @@ function render() {
     const s = state.settings || EMPTY.settings;
     root.innerHTML = shell(`
       <h1>Settings</h1>
-      <p class="muted">Pick who writes. Builtin FCC auto-updates on start. Custom is OpenAI-compatible. Nothing is posted.</p>
+      <p class="muted">Pick who writes. Free Claude Code is the default. VYCE gpt-6-luna is used when a VYCE key is set. Custom is any other OpenAI-compatible API. Nothing is posted.</p>
       <p id="fcc-status" class="muted">Checking bundled FCC…</p>
       <form class="card stack" id="f" style="margin-top:16px">
         <label>Provider</label>
         <select name="provider">
-          <option value="fcc"${s.provider !== "custom" ? " selected" : ""}>Builtin Free Claude Code (Sonnet 4.6)</option>
-          <option value="custom"${s.provider === "custom" ? " selected" : ""}>Custom OpenAI-compatible API</option>
+          <option value="fcc"${providerName(s.provider) === "fcc" ? " selected" : ""}>Builtin Free Claude Code (Sonnet 4.6)</option>
+          <option value="vyce"${providerName(s.provider) === "vyce" ? " selected" : ""}>VYCE · gpt-6-luna</option>
+          <option value="custom"${providerName(s.provider) === "custom" ? " selected" : ""}>Custom OpenAI-compatible API</option>
         </select>
+        <label>VYCE API key</label>
+        <input name="vyceKey" type="password" autocomplete="off" value="${esc(s.vyceKey || "")}" />
+        <p class="muted">VYCE gpt-6-luna for AI when this key is set. The model id is fixed. The key is stored in gitignored .env.local.</p>
         <label>Custom base URL</label>
         <input name="customBase" placeholder="http://127.0.0.1:8781/v1" value="${esc(s.customBase)}" />
         <label>Custom model id</label>
@@ -895,10 +908,11 @@ function render() {
       const form = e.target;
       const fd = new FormData(form);
       const next = {
-        provider: String(fd.get("provider") || "fcc") === "custom" ? "custom" : "fcc",
+        provider: providerName(String(fd.get("provider") || "fcc")),
         customBase: String(fd.get("customBase") || "").trim(),
         customModel: String(fd.get("customModel") || "").trim(),
-        customKey: String(fd.get("customKey") || "")
+        customKey: String(fd.get("customKey") || ""),
+        vyceKey: String(fd.get("vyceKey") || "")
       };
       state = save({ ...state, settings: next });
       setBusy(form, true);
@@ -912,7 +926,10 @@ function render() {
         if (!r.ok) throw new Error(data.error || `Settings HTTP ${r.status}`);
         const echoed = data.settings || {};
         if (echoed.provider !== next.provider) throw new Error("Settings did not round-trip provider");
-        setBusy(form, false, `Saved ${next.provider}${echoed.hasCustomKey ? " · key kept locally" : ""}`);
+        const keyNote = next.provider === "vyce"
+          ? (echoed.hasVyceKey ? " · gpt-6-luna · key kept locally" : "")
+          : (echoed.hasCustomKey ? " · key kept locally" : "");
+        setBusy(form, false, `Saved ${next.provider}${keyNote}`);
       } catch (err) {
         setBusy(form, false, String(err.message || err));
       }

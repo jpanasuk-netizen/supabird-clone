@@ -32,6 +32,8 @@ loadDotEnv(path.join(ROOT, ".env.local"));
 
 const HOST = "127.0.0.1";
 const PORT = 4747;
+const VYCE_BASE = "https://vyceai.com/v1";
+const VYCE_MODEL = "gpt-6-luna";
 const TYPES = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
@@ -223,9 +225,16 @@ function parseIdeas(text) {
   return parts.map((t) => ({ text: t }));
 }
 
+function normalizeProvider(value) {
+  const provider = String(value || "fcc").toLowerCase();
+  if (provider === "custom" || provider === "vyce") return provider;
+  return "fcc";
+}
+
 function readSettings() {
-  const provider = String(process.env.PROVIDER || "fcc").toLowerCase() === "custom" ? "custom" : "fcc";
+  const provider = normalizeProvider(process.env.PROVIDER || "fcc");
   const key = String(process.env.CUSTOM_API_KEY || "");
+  const vyceKey = String(process.env.VYCE_API_KEY || "");
   const route = fccRouteStatus();
   return {
     provider,
@@ -235,16 +244,27 @@ function readSettings() {
     customBase: String(process.env.CUSTOM_BASE_URL || ""),
     customModel: String(process.env.CUSTOM_MODEL || ""),
     hasCustomKey: Boolean(key),
-    customKeyHint: key ? `set (${key.slice(-4)})` : ""
+    customKeyHint: key ? `set (${key.slice(-4)})` : "",
+    vyceBase: VYCE_BASE,
+    vyceModel: VYCE_MODEL,
+    hasVyceKey: Boolean(vyceKey),
+    vyceKeyHint: vyceKey ? `set (${vyceKey.slice(-4)})` : ""
   };
 }
 
 function writeEnvLocal(input) {
-  const provider = String(input.provider || "fcc").toLowerCase() === "custom" ? "custom" : "fcc";
+  const provider = normalizeProvider(input.provider);
   const customBase = String(input.customBase || input.baseUrl || "").trim();
   const customModel = String(input.customModel || input.model || "").trim();
   const incomingKey = String(input.customKey || input.apiKey || "");
   const keepKey = incomingKey || String(process.env.CUSTOM_API_KEY || "");
+  const incomingVyce = String(input.vyceKey || "");
+  const keepVyce = provider === "fcc" ? "" : (incomingVyce || String(process.env.VYCE_API_KEY || ""));
+  if (provider === "vyce" && !keepVyce) {
+    const err = new Error("VYCE key is not set");
+    err.status = 400;
+    throw err;
+  }
   const route = fccRouteStatus();
   const lines = [
     "# gitignored. Do not commit.",
@@ -254,17 +274,22 @@ function writeEnvLocal(input) {
     "ANTHROPIC_API_KEY=local",
     `CUSTOM_BASE_URL=${customBase}`,
     `CUSTOM_MODEL=${customModel}`,
-    keepKey ? `CUSTOM_API_KEY=${keepKey}` : "# CUSTOM_API_KEY="
+    keepKey ? `CUSTOM_API_KEY=${keepKey}` : "# CUSTOM_API_KEY=",
+    keepVyce ? `VYCE_API_KEY=${keepVyce}` : "# VYCE_API_KEY=",
+    `VYCE_MODEL=${VYCE_MODEL}`
   ];
   fs.writeFileSync(path.join(ROOT, ".env.local"), lines.join("\n") + "\n", "utf8");
   process.env.PROVIDER = provider;
   process.env.CUSTOM_BASE_URL = customBase;
   process.env.CUSTOM_MODEL = customModel;
   if (keepKey) process.env.CUSTOM_API_KEY = keepKey;
+  else delete process.env.CUSTOM_API_KEY;
+  if (keepVyce) process.env.VYCE_API_KEY = keepVyce;
+  else delete process.env.VYCE_API_KEY;
 }
 
 async function complete(input, prompt) {
-  const provider = String(input.provider || process.env.PROVIDER || "fcc").toLowerCase();
+  const provider = normalizeProvider(input.provider || process.env.PROVIDER || "fcc");
   if (provider === "custom") {
     const supplied = input.custom && typeof input.custom === "object" ? input.custom : null;
     return customComplete(prompt.system, prompt.user, {
@@ -272,6 +297,17 @@ async function complete(input, prompt) {
       model: supplied ? supplied.model : process.env.CUSTOM_MODEL,
       apiKey: supplied ? supplied.apiKey : process.env.CUSTOM_API_KEY
     });
+  }
+  if (provider === "vyce") {
+    const supplied = input.vyce && typeof input.vyce === "object" ? input.vyce : null;
+    const key = String((supplied && supplied.apiKey) || process.env.VYCE_API_KEY || "").trim();
+    if (!key) throw new Error("VYCE key is not set");
+    const out = await customComplete(prompt.system, prompt.user, {
+      baseUrl: VYCE_BASE,
+      model: VYCE_MODEL,
+      apiKey: key
+    });
+    return { ...out, model: VYCE_MODEL, provider: "vyce" };
   }
   return fccComplete(prompt.system, prompt.user);
 }
@@ -317,7 +353,12 @@ async function handleSettings(req, res) {
     json(res, 400, { error: "Bad JSON" });
     return;
   }
-  writeEnvLocal(input);
+  try {
+    writeEnvLocal(input);
+  } catch (err) {
+    json(res, err.status || 400, { error: String(err.message || err) });
+    return;
+  }
   json(res, 200, { ok: true, settings: readSettings() });
 }
 
@@ -368,6 +409,8 @@ const server = http.createServer(async (req, res) => {
       fccSource: route.source || "unresolved",
       port: PORT,
       provider: String(process.env.PROVIDER || "fcc"),
+      vyceModel: VYCE_MODEL,
+      vyceWhenKeySet: Boolean(String(process.env.VYCE_API_KEY || "").trim()),
       fccVersion: ver.version,
       fccCommit: ver.commit,
       fccUpdate: fccUpdateStatus(),
@@ -553,7 +596,8 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, HOST, async () => {
   const ver = fccVersion();
   const x = hydrateXApp(ROOT);
-  console.log(`Blue Jay local http://${HOST}:${PORT}`);
+  console.log(`Blue Jay http://${HOST}:${PORT}`);
+  console.log(`VYCE ${VYCE_MODEL} for AI when key set`);
   console.log(`bundled FCC pin ${ver.version} ${ver.commit}`);
   console.log(`X @${x.expectedUsername} client=${x.hasClientId ? "yes *" + x.clientIdHint : "missing"} signedIn=${x.signedIn}`);
   kickFccUpdate();
