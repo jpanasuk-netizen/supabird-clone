@@ -4,6 +4,11 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, chmodS
 import { homedir } from "node:os";
 import { SpaceXAI } from "@xai-official/sdk";
 import { xSearch } from "@xai-official/sdk/tools";
+import {
+  opencliAvailable, runTopicFree, findRepliesFree, draftFree,
+  detectSession, invalidateSessionCache, fixtureReport,
+  postReplyFree, replyCommandArgs
+} from "./free-x.mjs";
 
 const PORT = 3489, KEYFILE = ".xai-key", DIR = "reports", TOPICS_F = "topics.json", SET_F = "settings.json", USAGE_F = "usage.jsonl", REPLIES_F = "replies.json";
 const BLUEJAY = "http://127.0.0.1:4747";
@@ -16,7 +21,7 @@ let topics = loadJ(TOPICS_F, [
   { id: "law", name: "⚖️ Law", desc: "legal news, court rulings, Supreme Court, lawsuits, legal commentary, regulation" },
   { id: "finance", name: "💵 Finance", desc: "markets, stocks, the Fed, interest rates, crypto, earnings, economy" },
 ]);
-let settings = { model: "grok-4.7", auto: false, every: 60, focus: "", daily: true, dailyAt: "06:00", dailyDone: "", lastMuse: null, ...loadJ(SET_F, {}) };
+let settings = { replyAs: "@Jasper_Black", model: "grok-4.7", auto: false, every: 60, focus: "", daily: true, dailyAt: "06:00", dailyDone: "", lastMuse: null, ...loadJ(SET_F, {}) };
 const saveTopics = () => writeFileSync(TOPICS_F, JSON.stringify(topics, null, 1));
 const saveSettings = () => writeFileSync(SET_F, JSON.stringify(settings, null, 1));
 if (!existsSync(TOPICS_F)) saveTopics();
@@ -35,7 +40,7 @@ function friendly(e) {
 }
 const client = () => new SpaceXAI({ apiKey: getKey() });
 
-async function runTopic(t) {
+async function runTopicPaid(t) {
   const from = new Date(Date.now() - 864e5).toISOString().slice(0, 10);
   const r = await client().responses.create({
     model: settings.model,
@@ -49,9 +54,42 @@ Find the top 5 topics getting the most engagement right now. For each give exact
 - Idea: one reply or post I could write, plain and punchy
 Only use what you actually found. Don't make up numbers.`,
   });
-  const f = `${t.id}-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}.md`;
-  writeFileSync(`${DIR}/${f}`, r.toText());
   runs[t.id].usage = recordUsage("run", t.id, r.usage);
+  runs[t.id].path = "xai";
+  return r.toText();
+}
+
+async function runTopic(t) {
+  const topic = { ...t, focus: settings.focus || "" };
+  let md = "", path = "fixture", errFree = "", errPaid = "";
+  // 1) Prefer OpenCLI free session (no API key / credits)
+  if (opencliAvailable()) {
+    try {
+      md = await runTopicFree(topic);
+      path = "opencli";
+    } catch (e) { errFree = String(e.message || e).slice(0, 240); console.log(new Date().toISOString(), "opencli run failed", t.id, errFree); }
+  }
+  // 2) Optional paid xAI path only if free failed and a key is present
+  if (!md && getKey()) {
+    try {
+      md = await runTopicPaid(t);
+      path = "xai";
+    } catch (e) { errPaid = friendly(e); console.log(new Date().toISOString(), "xai run failed", t.id, errPaid); }
+  }
+  // 3) Fixture / last-good so the UI still shows something useful
+  if (!md) {
+    md = fixtureReport(topic);
+    path = "fixture";
+    if (errFree || errPaid) {
+      md = `> Free path note: ${errFree || "OpenCLI unavailable"}${errPaid ? " · Paid path: " + errPaid : ""}
+
+` + md;
+    }
+  }
+  const f = `${t.id}-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}.md`;
+  writeFileSync(`${DIR}/${f}`, md);
+  runs[t.id].path = path;
+  if (path !== "xai") runs[t.id].usage = { total: 0, in: 0, out: 0, cost_usd: 0, path };
   return f;
 }
 
@@ -169,25 +207,81 @@ async function sendToMuse(label) {
 // ---- Reply finder: real replies only, verbatim, via X search
 let replies = loadJ(REPLIES_F, []), repliesVer = 1;
 const saveReplies = () => { writeFileSync(REPLIES_F, JSON.stringify(replies, null, 1)); repliesVer++; };
+
+// ---- LIVE reply posting (only from a card's "Post reply" button, after confirm()) ----
+// Every post is a REPLY to one specific tweet id (OpenCLI opens x.com/compose/post?in_reply_to=<id>).
+// There is no standalone-post path here.
+const POSTED_F = "posted.json";
+let posted = loadJ(POSTED_F, []), postingNow = false;
+const savePosted = () => writeFileSync(POSTED_F, JSON.stringify(posted.slice(0, 500), null, 1));
+// Accept a bare numeric id or an x.com / twitter.com status URL; return the numeric id or "".
+function tweetIdOf(v) {
+  const s = String(v ?? "").trim();
+  if (/^\d{5,25}$/.test(s)) return s;
+  try {
+    const u = new URL(s);
+    const h = u.hostname.toLowerCase().replace(/^(www|mobile)\./, "");
+    const m = u.pathname.match(/^\/([A-Za-z0-9_]{1,30})\/status\/(\d{5,25})\/?$/);
+    if (u.protocol === "https:" && (h === "x.com" || h === "twitter.com") && m) return m[2];
+  } catch {}
+  return "";
+}
+function tweetHandleOf(v) {
+  try { const m = new URL(String(v)).pathname.match(/^\/([A-Za-z0-9_]{1,30})\/status\//); return m && m[1] !== "i" ? m[1] : "i"; } catch { return "i"; }
+}
+// X's weighted length: URLs count 23, most Latin/punctuation 1, everything else (emoji, CJK) 2.
+function xLen(t) {
+  let n = 0;
+  for (const ch of String(t).replace(/https?:\/\/\S+/g, "x".repeat(23))) {
+    const c = ch.codePointAt(0);
+    n += (c <= 4351 || (c >= 8192 && c <= 8205) || (c >= 8208 && c <= 8223) || (c >= 8242 && c <= 8247)) ? 1 : 2;
+  }
+  return n;
+}
 for (const e of replies) if (e.status === "running") { e.status = "error"; e.error = "Interrupted by a restart."; }
 const isStatus = (u) => /^https:\/\/(x|twitter)\.com\/[A-Za-z0-9_]{1,15}\/status\/\d+/.test(u || "");
 const clip = (v, n) => String(v ?? "").slice(0, n);
 function extractJson(t) { const a = t.indexOf("{"), b = t.lastIndexOf("}"); if (a < 0 || b < a) throw new Error("Grok didn't return usable results. Try again."); return JSON.parse(t.slice(a, b + 1)); }
-async function findReplies(e, ctx) {
-  try {
-    const from = new Date(Date.now() - 2 * 864e5).toISOString().slice(0, 10);
-    const r = await client().responses.create({ model: settings.model, tools: [xSearch({ from_date: from })],
-      input: `Trend: ${e.trend}\nContext: ${clip(ctx, 800)}\n
+async function findRepliesPaid(e, ctx) {
+  const from = new Date(Date.now() - 2 * 864e5).toISOString().slice(0, 10);
+  const r = await client().responses.create({ model: settings.model, tools: [xSearch({ from_date: from })],
+    input: `Trend: ${e.trend}\nContext: ${clip(ctx, 800)}\n
 Use X search. Step 1: find the 3 biggest recent X posts about this trend (most likes/reposts/views). Step 2: for each of those posts, find the replies real people posted under it, and pick up to 3 of the best hot-take replies (sharp, opinionated, high engagement).
 RULES: Quote replies VERBATIM, exactly as posted. Only include a reply you actually retrieved from X search, with its real status URL. Never write, paraphrase, summarize or invent a reply. If you could not retrieve real replies for a post, give it an empty replies list. Include engagement numbers only if search returned them, else "".
 Return ONLY this JSON, no prose: {"posts":[{"author":"@handle","url":"https://x.com/handle/status/ID","text":"first ~200 chars of the post","engagement":"","replies":[{"author":"@handle","url":"https://x.com/handle/status/ID","text":"verbatim reply","engagement":""}]}]}` });
-    e.usage = recordUsage("replies", e.topic, r.usage);
-    const j = extractJson(r.toText());
-    e.posts = (Array.isArray(j.posts) ? j.posts : []).filter((p) => isStatus(p.url)).slice(0, 3).map((p) => ({
-      author: clip(p.author, 40), url: p.url, text: clip(p.text, 400), engagement: clip(p.engagement, 80),
-      replies: (Array.isArray(p.replies) ? p.replies : []).filter((x) => isStatus(x.url) && String(x.text || "").trim() && x.url !== p.url).slice(0, 3)
-        .map((x) => ({ author: clip(x.author, 40), url: x.url, text: clip(x.text, 1000), engagement: clip(x.engagement, 80) })) }));
-    e.status = "done";
+  e.usage = recordUsage("replies", e.topic, r.usage);
+  e.path = "xai";
+  const j = extractJson(r.toText());
+  e.posts = (Array.isArray(j.posts) ? j.posts : []).filter((p) => isStatus(p.url)).slice(0, 3).map((p) => ({
+    author: clip(p.author, 40), url: p.url, text: clip(p.text, 400), engagement: clip(p.engagement, 80),
+    replies: (Array.isArray(p.replies) ? p.replies : []).filter((x) => isStatus(x.url) && String(x.text || "").trim() && x.url !== p.url).slice(0, 3)
+      .map((x) => ({ author: clip(x.author, 40), url: x.url, text: clip(x.text, 1000), engagement: clip(x.engagement, 80) })) }));
+}
+
+async function findReplies(e, ctx) {
+  try {
+    if (opencliAvailable()) {
+      try {
+        const posts = await findRepliesFree(e.trend, ctx);
+        e.posts = (posts || []).filter((p) => isStatus(p.url)).slice(0, 3).map((p) => ({
+          author: clip(p.author, 40), url: p.url, text: clip(p.text, 400), engagement: clip(p.engagement, 80),
+          replies: (Array.isArray(p.replies) ? p.replies : []).filter((x) => isStatus(x.url) && String(x.text || "").trim() && x.url !== p.url).slice(0, 3)
+            .map((x) => ({ author: clip(x.author, 40), url: x.url, text: clip(x.text, 1000), engagement: clip(x.engagement, 80) })) }));
+        e.path = "opencli";
+        e.usage = { total: 0, in: 0, out: 0, cost_usd: 0, path: "opencli" };
+        e.status = "done";
+        saveReplies();
+        return;
+      } catch (err) { console.log(new Date().toISOString(), "opencli replies failed", err.message || err); }
+    }
+    if (getKey()) {
+      await findRepliesPaid(e, ctx);
+      e.status = "done";
+      saveReplies();
+      return;
+    }
+    e.status = "error";
+    e.error = "No free session and no API key. Install/login OpenCLI, or paste an optional xAI key.";
   } catch (err) { e.status = "error"; e.error = err instanceof SyntaxError ? "Grok's answer wasn't valid JSON. Try again." : friendly(err); }
   saveReplies();
 }
@@ -195,7 +289,7 @@ Return ONLY this JSON, no prose: {"posts":[{"author":"@handle","url":"https://x.
 // Server-side run queue (one at a time) + auto-refresh timer
 const runs = {}, queue = []; let working = false, lastError = "", nextRun = null, timer = null;
 function enqueue(ids) {
-  if (!getKey()) return "Enter your API key first.";
+  // Free OpenCLI path works with no key; key is optional.
   for (const id of ids) {
     if (!topics.find((t) => t.id === id)) continue;
     const s = (runs[id] ||= {});
@@ -267,9 +361,15 @@ function listReports(q) {
 function state() {
   const all = listReports(), latest = {};
   for (const r of all) if (!latest[r.topic]) latest[r.topic] = r;
-  return { ok: true, hasKey: !!getKey(), keySource: keySource(), settings, topics, runs, latest, lastRun: all[0]?.t || null, nextRun, nextDaily: nextDaily(), lastError,
+  const sess = sessionSnap || { mode: opencliAvailable() ? "opencli" : (getKey() ? "xai" : "fixture"),
+    label: opencliAvailable() ? "free session (OpenCLI) · no API key needed" : (getKey() ? "xAI API key (paid path)" : "fixture/mock · offline sample"),
+    opencli: opencliAvailable(), hasKey: !!getKey() };
+  return { ok: true, hasKey: !!getKey(), keySource: keySource(), session: { ...sess, hasKey: !!getKey() }, settings, topics, runs, latest, lastRun: all[0]?.t || null, nextRun, nextDaily: nextDaily(), lastError,
     usage: usageSummary(), repliesVer, repliesBusy: replies.filter((e) => e.status === "running").length };
 }
+let sessionSnap = null;
+detectSession(!!getKey()).then((s) => { sessionSnap = s; }).catch(() => {});
+setInterval(() => { detectSession(!!getKey()).then((s) => { sessionSnap = s; }).catch(() => {}); }, 60e3);
 
 const page = String.raw`<!doctype html><html><head><meta charset="utf-8"><title>X Trends Desk</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -309,6 +409,9 @@ input[type=time]{padding:5px 8px;color-scheme:dark}#cost{font-size:13px;cursor:h
 .lab{display:inline-block;min-width:58px;color:var(--m);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.4px}
 a{color:#6cb6ff;text-decoration:none}a:hover{text-decoration:underline}a.lnk{display:inline-block;margin:1px 4px 1px 0;padding:0 7px;border-radius:999px;background:#1d9bf014;border:1px solid #1d9bf033;font-size:12.5px}
 .acts{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}.dr textarea{width:100%;margin-top:8px;resize:vertical;background:#0b1118}.drbar{display:flex;gap:10px;align-items:center;margin-top:4px}.drbar .muted{flex:1}.cnt{font-size:12px;color:var(--m)}.cnt.over{color:var(--r)}
+.pr{white-space:normal;margin-top:8px;border:1px solid #1d9bf044;border-radius:10px;padding:7px 9px;background:#0b1118}.prh{display:flex;gap:6px;align-items:center;flex-wrap:wrap;font-size:12.5px;color:var(--m)}.prh b{color:var(--t);font-weight:600}.prh code{font:11.5px ui-monospace,Consolas,monospace;color:#8ecdf8;background:#1d9bf014;border:1px solid #1d9bf033;border-radius:6px;padding:0 6px}
+.pr textarea{width:100%;margin-top:6px;resize:vertical;min-height:54px;background:#0f1620;font-size:14px}.prbar{display:flex;gap:8px;align-items:center;margin-top:4px;flex-wrap:wrap}.prr{flex:1;font-size:12.5px;min-width:120px;word-break:break-all}
+button.post{background:#1d9bf0;border-color:#1d9bf0;color:#fff;font-weight:700}.prtid{font-size:11.5px;color:var(--m)}
 aside .tools{display:flex;gap:8px;padding:10px 14px}aside .tools input{flex:1}
 #hist{list-style:none;margin:0;padding:0 8px 10px;overflow:auto;flex:1}#hist li{display:flex;align-items:center;gap:2px;border-radius:8px}#hist li:hover{background:var(--p2)}
 #hist li a{flex:1;display:flex;justify-content:space-between;gap:8px;padding:6px 8px;cursor:pointer;color:var(--t)}#hist li a span{color:var(--m);font-size:12.5px;white-space:nowrap}
@@ -323,7 +426,7 @@ footer{display:flex;gap:18px;align-items:center;padding:6px 22px;border-top:1px 
 @media(max-width:1100px){body{height:auto;display:block}main{grid-template-columns:1fr}#cols{grid-auto-flow:row;grid-auto-columns:auto}.col{max-height:80vh}aside{max-height:60vh}#key,#focus{width:100%}}
 </style></head><body>
 <header><h1>📈 X Trends <b>Desk</b></h1>
-<div class=grp><input id=key type=password autocomplete=off placeholder="Paste your xAI API key"><button onclick="saveKey()">Save key</button></div>
+<div class=grp><input id=key type=password autocomplete=off placeholder="Optional xAI key (OpenCLI works without it)"><button onclick="saveKey()">Save key</button></div>
 <div class=grp><label for=model>Model</label><input id=model list=mlist spellcheck=false onchange="setS({model:this.value.trim()})"><datalist id=mlist></datalist></div>
 <div class=grp><input id=focus placeholder="Optional focus: SEC, crypto law, bankruptcy…"><button id=runall onclick="runT('all')">▶ Run all</button></div>
 <div class=grp><label><input type=checkbox id=auto onchange="setS({auto:this.checked,every:+every.value})"> Auto-refresh</label>
@@ -335,12 +438,13 @@ footer{display:flex;gap:18px;align-items:center;padding:6px 22px;border-top:1px 
 <main><div id=cols></div>
 <aside><h2>🗂 Report history <span class=sp></span><span id=hcount class=meta></span></h2>
 <div class=tools><input id=q placeholder="Search reports (topic, words, @handle)…" oninput="clearTimeout(hist.t);hist.t=setTimeout(hist,250)"></div><ul id=hist></ul></aside>
-<section id=rp class=col><h2>💬 Replies <span class=meta>Real replies found by Grok X search, quoted verbatim. Open the links to confirm. Nothing is ever posted.</span><span class=sp></span><span id=rpc class=meta></span></h2><div class=rlist id=rlist><div class=empty>Hit “💬 Get replies” on any trend card.</div></div></section></main>
+<section id=rp class=col><h2>💬 Replies <span class=meta>Real replies via OpenCLI (free) or optional Grok X search, quoted verbatim. Open the links to confirm. Nothing posts unless you press 🚀 Post reply under a tweet (it replies to that exact tweet).</span><span class=sp></span><span id=rpc class=meta></span></h2><div class=rlist id=rlist><div class=empty>Hit “💬 Get replies” on any trend card.</div></div></section></main>
 <footer><span id=sKey>…</span><span>Model: <b id=sModel></b></span><span id=sRun>Idle</span><span id=sMuse></span><span id=sErr></span><span>Times in CT</span></footer>
 <div id=ov onclick="if(event.target===this)closeDlg()"><div id=dlg><div class=hd><b id=dt></b><span id=da></span><button class="sm ghost" onclick="closeDlg()">✕</button></div><div class=bd id=db></div></div></div>
 <div id=toast></div>
 <script>
 let S={topics:[],runs:{},latest:{},settings:{}},shown={},cards=[],tkey='',first=1,RL=[],rVer=0,bjUp=false;const BJ='http://127.0.0.1:4747';
+let PR={},POSTED={},PENDING={},DRAFTS={},REPLY_AS='@Jasper_Black';try{PR=JSON.parse(localStorage.getItem('td-pr')||'{}')}catch(e){PR={}}
 const fmtTok=n=>n>=1e6?(n/1e6).toFixed(2)+'M':n>=1e3?(n/1e3).toFixed(1)+'k':String(n||0);
 const money=u=>u.api?' · $'+u.api.toFixed(u.api<1?4:2)+' API':u.est?' · ≈$'+u.est.toFixed(u.est<1?3:2)+' est':'';
 const IDEA=/^\s*[-*]\s*\**Idea\**:\**\s*(.+)$/mi;
@@ -349,6 +453,32 @@ const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'
 const CT=t=>t?new Date(t).toLocaleString('en-US',{timeZone:'America/Chicago',month:'short',day:'numeric',hour:'numeric',minute:'2-digit'})+' CT':'—';
 async function api(p,o){try{const r=await fetch(p,o===undefined?{}:{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(o)});return await r.json().catch(()=>({ok:false,error:'Server error '+r.status}))}catch(e){return{ok:false,error:'The dashboard server is not reachable. Restart X Trends Desk.'}}}
 function toast(m,bad){const t=$('toast');t.textContent=m;t.className='show'+(bad?' bad':'');clearTimeout(toast.t);toast.t=setTimeout(()=>t.className='',bad?5000:1800)}
+// ---- Post reply: one box per tweet; each box carries ITS OWN tweet id + URL ----
+const TID=u=>{const m=String(u||'').match(/^https:\/\/(?:www\.|mobile\.)?(?:x|twitter)\.com\/([A-Za-z0-9_]{1,30})\/status\/(\d{5,25})\/?(?:[?#].*)?$/);return m?m[2]:''};
+function xlen(t){let n=0;for(const ch of String(t).replace(/https?:\/\/\S+/g,'x'.repeat(23))){const c=ch.codePointAt(0);n+=(c<=4351||(c>=8192&&c<=8205)||(c>=8208&&c<=8223)||(c>=8242&&c<=8247))?1:2}return n}
+function prBox(url,author,pre){const id=TID(url);if(!id)return'';const hm=String(url).match(/\.com\/([A-Za-z0-9_]{1,30})\/status/),h=author||(hm&&hm[1]!=='i'?'@'+hm[1]:'this tweet');
+ return '<div class=pr data-id="'+id+'" data-url="'+esc(url)+'" data-pre="'+esc(pre||'')+'"><div class=prh>↩ Reply to <b>'+esc(h)+'</b><span class=prtid>tweet</span><code title="Posts as a reply to exactly this tweet">'+id+'</code><span class=sp></span><a class=lnk href="'+esc(url)+'" target=_blank rel=noopener>open</a></div>'
+ +'<textarea rows=2 placeholder="Write your reply to this tweet…"></textarea><div class=prbar><span class=cnt></span><span class=prr></span><span class=prtid>→ in_reply_to '+id+'</span><button class="sm post" onclick="postR(this)">🚀 Post reply</button></div></div>'}
+function prCount(w){const ta=w.querySelector('textarea'),c=w.querySelector('.cnt'),n=xlen(ta.value.trim());c.textContent=n+'/280';c.className='cnt'+(n>280?' over':'')}
+function prResult(w){const id=w.dataset.id,r=w.querySelector('.prr'),P=POSTED[id];
+ if(PENDING[id]){r.innerHTML='<span class=spin></span> Posting reply to '+id+'…';return}
+ if(P&&P.ok){r.innerHTML='<span class=ok>✓ Replied</span> '+(P.url?'<a href="'+esc(P.url)+'" target=_blank rel=noopener>'+esc(P.url)+'</a>':'<span class=muted>(X did not return the link; check your replies)</span>')}
+ else if(P&&P.error){r.innerHTML='<span class=bad>✗ '+esc(P.error)+'</span>'}else r.textContent=''}
+function hydratePR(root){(root||document).querySelectorAll('.pr').forEach(w=>{const id=w.dataset.id,ta=w.querySelector('textarea');
+ const v=PR[id]!=null?PR[id]:(w.dataset.pre||'');if(document.activeElement!==ta)ta.value=v;ta.disabled=!!PENDING[id];w.querySelector('button.post').disabled=!!PENDING[id];prCount(w);prResult(w)})}
+document.addEventListener('input',e=>{const w=e.target.closest&&e.target.closest('.pr');if(!w||e.target.tagName!=='TEXTAREA')return;PR[w.dataset.id]=e.target.value;try{localStorage.setItem('td-pr',JSON.stringify(PR))}catch(_){}
+ document.querySelectorAll('.pr[data-id="'+w.dataset.id+'"]').forEach(o=>{if(o!==w)o.querySelector('textarea').value=e.target.value;prCount(o)})});
+async function loadPosted(){const j=await api('/api/posted');if(!j.ok)return;if(j.replyAs)REPLY_AS=j.replyAs;POSTED={};(j.posted||[]).slice().reverse().forEach(x=>{if(x.ok||!POSTED[x.tweetId]||!POSTED[x.tweetId].ok)POSTED[x.tweetId]=x});hydratePR()}
+async function postR(b){const w=b.closest('.pr'),id=w.dataset.id,url=w.dataset.url,ta=w.querySelector('textarea'),t=ta.value.trim();
+ if(!id||TID(url)!==id)return toast('This box has no valid tweet id. Nothing posted.',1);
+ if(!t)return toast('Write a reply first',1);const n=xlen(t);if(n>280)return toast('Too long: '+n+'/280',1);
+ if(POSTED[id]&&POSTED[id].ok&&!confirm('You already replied to tweet '+id+'. Post another reply to it?'))return;
+ if(!confirm('Post this reply LIVE on X as '+REPLY_AS+'?\n\nReplying to tweet '+id+'\n'+url+'\n\n'+t+'\n\n('+n+'/280)'))return;
+ PENDING[id]=1;hydratePR();
+ const j=await api('/api/reply',{tweetId:id,url:url,text:t});delete PENDING[id];
+ POSTED[id]=j.ok?{ok:true,url:j.url||'',text:t,ts:Date.now()}:{ok:false,error:j.error||'Failed'};
+ if(j.ok){delete PR[id];try{localStorage.setItem('td-pr',JSON.stringify(PR))}catch(_){}toast('Reply posted to '+id)}else toast(j.error||'Reply failed',1);
+ hydratePR()}
 async function copy(s){try{await navigator.clipboard.writeText(s)}catch(e){const a=document.createElement('textarea');a.value=s;document.body.appendChild(a);a.select();document.execCommand('copy');a.remove()}toast('Copied')}
 function shortUrl(u){const m=u.match(/^https?:\/\/(?:www\.|mobile\.)?(?:x|twitter)\.com\/([^\/]+)\/status/);return m?'@'+m[1]+' on X':u.replace(/^https?:\/\/(www\.)?/,'').replace(/[\/?#].*$/,'')}
 function inline(s){return esc(s).replace(/\*\*(.+?)\*\*/g,'<b>$1</b>')
@@ -358,20 +488,30 @@ const LI=/^([-*•]|\d+[.)])\s+/;
 function body(t){return t.split('\n').map(l=>{l=l.trim();if(!l)return'';if(/^#{1,2} /.test(l))return'<h4>'+inline(l.replace(/^#+ /,''))+'</h4>';const li=LI.test(l);l=inline(l.replace(LI,'')).replace(/^(?:<b>)?([A-Z][A-Za-z ]{1,14}):(?:<\/b>)?\s*/,'<span class=lab>$1</span> ');return li?'<div class=li>'+l+'</div>':'<p>'+l+'</p>'}).join('')}
 function render(md,el,topic,f){const parts=md.split(/^### /m),intro=parts.shift().trim();let h=intro?'<div class=intro>'+body(intro)+'</div>':'';h+='<div class=cards>';
  parts.forEach((p,i)=>{const n=p.indexOf('\n'),title=(n<0?p:p.slice(0,n)).trim(),b=n<0?'':p.slice(n+1).trim(),k=cards.push({title:title,body:b,topic:topic||''})-1;
-  h+='<article class=card><div class=rank>'+(i+1)+'</div><h3>'+inline(title)+'</h3>'+body(b)+'<div class=acts><button class=sm onclick="copyCard('+k+')">⧉ Copy</button><button class="sm pri" onclick="draft(this,'+k+')">✍ Draft X post</button><button class=sm onclick="getReplies('+k+')">💬 Get replies</button><button class=sm onclick="toBJ('+k+')">🐦 Send to Blue Jay</button></div><div class=dr></div></article>'});
- el.innerHTML=h+'</div>';
+  h+='<article class=card><div class=rank>'+(i+1)+'</div><h3>'+inline(title)+'</h3>'+body(b)+'<div class=acts><button class=sm onclick="copyCard('+k+')">⧉ Copy</button><button class="sm pri" onclick="draft(this,'+k+')">✍ Draft X post</button><button class=sm onclick="getReplies('+k+')">💬 Get replies</button><button class=sm onclick="toBJ('+k+')">🐦 Send to Blue Jay</button></div><div class=dr></div>'+cardPR(b,title)+'</article>'});
+ el.innerHTML=h+'</div>';hydratePR(el);
  if(f)api('/api/diff?f='+encodeURIComponent(f)).then(d=>{if(!d.ok||!d.prev)return;const cs=el.querySelectorAll('.card');(d.tags||[]).forEach((t,i)=>{if(cs[i]&&t.tag&&t.tag!=='STEADY')cs[i].querySelector('h3').insertAdjacentHTML('beforeend','<span class="tag '+t.tag+'" title="'+(t.was?'was #'+t.was:'not in ')+' '+d.basis+'">'+t.tag+'</span>')});
   if(d.fading.length)el.insertAdjacentHTML('beforeend','<details class=fade><summary>📉 Fading vs '+esc(d.basis)+' ('+d.fading.length+')</summary><ul>'+d.fading.map(x=>'<li>'+esc(x.title)+' <span class=muted>#'+x.was+(x.now?' → #'+x.now:' → gone')+'</span></li>').join('')+'</ul></details>')})}
+function cardPR(b,title){const urls=[...new Set((b.match(/https:\/\/(?:www\.|mobile\.)?(?:x|twitter)\.com\/[A-Za-z0-9_]{1,30}\/status\/\d{5,25}/g)||[]))].slice(0,3);if(!urls.length)return'';
+ const m=b.match(IDEA),pre=DRAFTS[title]||(m?m[1].replace(/\*\*/g,'').trim():'');return urls.map(u=>{const a=u.match(/\.com\/([^\/]+)\/status/);return prBox(u,a&&a[1]!=='i'?'@'+a[1]:'',pre)}).join('')}
 async function draft(b,k){const box=b.closest('.card').querySelector('.dr');b.disabled=true;box.innerHTML='<p class=muted><span class=spin></span> Asking Grok for a draft…</p>';const j=await api('/api/draft',{text:cards[k].title+'\n'+cards[k].body});b.disabled=false;
  if(!j.ok){box.innerHTML='<div class=err style="margin:8px 0 0">'+esc(j.error)+'</div>';return}
- box.innerHTML='<textarea rows=4></textarea><div class=drbar><span class=cnt></span><span class=muted>Draft only. Nothing is posted.</span><button class="sm pri">⧉ Copy draft</button></div>';
- const ta=box.querySelector('textarea'),c=box.querySelector('.cnt'),u=()=>{c.textContent=ta.value.length+'/280';c.className='cnt'+(ta.value.length>280?' over':'')};ta.value=j.text;ta.oninput=u;u();box.querySelector('button').onclick=()=>copy(ta.value)}
+ box.innerHTML='<textarea rows=4></textarea><div class=drbar><span class=cnt></span><span class=muted>Draft. To post it, use 🚀 Post reply under a tweet below.</span><button class="sm pri">⧉ Copy draft</button></div>';
+ const ta=box.querySelector('textarea'),c=box.querySelector('.cnt'),u=()=>{c.textContent=ta.value.length+'/280';c.className='cnt'+(ta.value.length>280?' over':'')};ta.value=j.text;ta.oninput=u;u();box.querySelector('button').onclick=()=>copy(ta.value);
+ DRAFTS[cards[k].title]=j.text;b.closest('.card').querySelectorAll('.pr').forEach(w=>{if(PR[w.dataset.id]==null){w.dataset.pre=j.text}});hydratePR(b.closest('.card'))}
 function tname(id){const t=S.topics.find(x=>x.id===id);return t?t.name:id}
 function cols(){const k=JSON.stringify(S.topics);if(k===tkey)return;tkey=k;shown={};
  $('cols').innerHTML=S.topics.map(t=>'<section class=col id="c-'+t.id+'"><h2><span class=nm title="'+esc(t.desc)+'">'+esc(t.name)+'</span><span class=meta></span><button class=sm onclick="runT(\''+t.id+'\')">▶ Run</button><button class="sm ghost" title="Remove column" onclick="rmT(\''+t.id+'\')">✕</button></h2><div class=err hidden></div><div class=out><div class=empty>Not run yet. Hit Run.</div></div></section>').join('')||'<div class=empty>No columns. Add one.</div>'}
 async function tick(){const j=await api('/api/state');if(j.ok===false){$('sErr').textContent=j.error;return}S=j;cols();
- $('sKey').innerHTML=S.hasKey?'<span class=ok>● Key saved'+(S.keySource==='env'?' (from env)':'')+'</span>':'<span class=bad>● No API key — paste one above</span>';
- $('key').placeholder=S.hasKey?'Key saved ✓ (paste a new one to replace)':'Paste your xAI API key';
+ const sess=S.session||{};
+ if(sess.mode==='opencli'||(!S.hasKey&&sess.mode==='fixture'&&sess.opencli!==false)){
+  $('sKey').innerHTML='<span class=ok>● '+(sess.label||'free session (OpenCLI) · no API key needed')+(S.hasKey?' · optional key saved':'')+'</span>';
+ }else if(S.hasKey){
+  $('sKey').innerHTML='<span class=ok>● Key saved'+(S.keySource==='env'?' (from env)':'')+(sess.mode==='xai'?' · paid path':'')+'</span>';
+ }else{
+  $('sKey').innerHTML='<span class=ok>● free path ready — API key optional</span>';
+ }
+ $('key').placeholder=S.hasKey?'Optional xAI key saved ✓ (free OpenCLI still preferred)':'Optional xAI key (OpenCLI works without it)';
  if(document.activeElement!==$('model'))$('model').value=S.settings.model;$('sModel').textContent=S.settings.model;
  $('auto').checked=S.settings.auto;$('every').value=S.settings.every;if(first){$('focus').value=S.settings.focus||'';first=0}
  $('last').textContent=CT(S.lastRun);const nx=[S.settings.auto&&S.nextRun,S.nextDaily].filter(Boolean).sort((a,b)=>a-b)[0];$('next').textContent=nx?CT(nx)+(nx===S.nextDaily?' (daily)':''):'off';
@@ -382,7 +522,7 @@ async function tick(){const j=await api('/api/state');if(j.ok===false){$('sErr')
  if(S.repliesVer!==rVer){rVer=S.repliesVer;loadReplies()}
  let busy=0;
  for(const t of S.topics){const c=$('c-'+t.id);if(!c)continue;const r=S.runs[t.id]||{},m=c.querySelector('.meta'),e=c.querySelector('.err'),L=S.latest[t.id];
-  if(r.status==='running'){busy++;m.innerHTML='<span class=spin></span> searching X…'}else if(r.status==='queued'){busy++;m.textContent='queued'}else m.textContent=(L?CT(L.t):'')+(r.usage?' · '+fmtTok(r.usage.total||r.usage.in+r.usage.out)+' tok'+money({api:r.usage.cost_usd||0,est:0}):'');
+  if(r.status==='running'){busy++;m.innerHTML='<span class=spin></span> searching X…'}else if(r.status==='queued'){busy++;m.textContent='queued'}else m.textContent=(L?CT(L.t):'')+(r.path?' · '+r.path:'')+(r.usage&&(r.usage.total||r.usage.in)?' · '+fmtTok(r.usage.total||r.usage.in+r.usage.out)+' tok'+money({api:r.usage.cost_usd||0,est:0}):'');
   e.hidden=r.status!=='error';if(r.status==='error')e.textContent=r.error;
   if(L&&shown[t.id]!==L.f){shown[t.id]=L.f;fetch('/api/report?f='+encodeURIComponent(L.f)).then(x=>x.text()).then(md=>render(md,c.querySelector('.out'),t.id,L.f))}
   else if(!L&&shown[t.id]){shown[t.id]=0;c.querySelector('.out').innerHTML='<div class=empty>Not run yet. Hit Run.</div>'}}
@@ -403,13 +543,13 @@ function addDlg(){dlg('Add a topic column','','<div class=form><input id=an plac
 async function addT(){const j=await api('/api/topics',{action:'add',name:$('an').value,desc:$('ad').value});if(!j.ok)return toast(j.error,1);closeDlg();toast('Column added');tick()}
 async function rmT(id){if(!confirm('Remove the "'+tname(id)+'" column? Its saved reports stay in history.'))return;const j=await api('/api/topics',{action:'remove',id});j.ok?tick():toast(j.error,1)}
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closeDlg();if(e.key==='Enter'&&e.target.id==='key')saveKey();if(e.key==='Enter'&&(e.target.id==='an'||e.target.id==='ad'))addT()});
-async function getReplies(k){const c=cards[k],cs=RL.filter(e=>e.usage&&e.usage.cost_usd).map(e=>e.usage.cost_usd);if(cs.length&&!confirm('Get replies runs a deep X search. Recent ones cost about $'+(cs.reduce((a,b)=>a+b,0)/cs.length).toFixed(2)+' each (from the API). Continue?'))return;$('rp').scrollIntoView({behavior:'smooth',block:'end'});const j=await api('/api/replies',{topic:c.topic,title:c.title,text:c.body});if(!j.ok)return toast(j.error,1);toast('Searching X for real replies…');tick()}
+async function getReplies(k){const c=cards[k],free=!(S.session&&S.session.mode==='xai'&&S.hasKey&&!S.session.opencli),cs=RL.filter(e=>e.usage&&e.usage.cost_usd).map(e=>e.usage.cost_usd);if(!free&&cs.length&&!confirm('Get replies runs a deep X search. Recent ones cost about $'+(cs.reduce((a,b)=>a+b,0)/cs.length).toFixed(2)+' each (from the API). Continue?'))return;$('rp').scrollIntoView({behavior:'smooth',block:'end'});const j=await api('/api/replies',{topic:c.topic,title:c.title,text:c.body});if(!j.ok)return toast(j.error,1);toast(free?'Searching X via free OpenCLI…':'Searching X for real replies…');tick()}
 async function loadReplies(){const j=await api('/api/replies');if(!j.replies)return;RL=j.replies;$('rpc').textContent=RL.length?RL.length+' saved':'';
  const lk=(u,t)=>'<a class=lnk href="'+esc(u)+'" target=_blank rel=noopener>'+esc(t||shortUrl(u))+'</a>';
  $('rlist').innerHTML=RL.length?RL.map((e,ei)=>'<div class=rent><div class=rh><b>'+esc(tname(e.topic))+' › '+esc(e.trend)+'</b><span class=meta>'+(e.status==='running'?'<span class=spin></span> searching X for real replies…':CT(e.ts)+(e.usage?' · '+fmtTok(e.usage.total||e.usage.in+e.usage.out)+' tok':''))+'</span><button class=sm onclick="copyR('+ei+')">⧉ Copy</button><button class="sm ghost" title="Delete" onclick="delR(\''+e.id+'\')">🗑</button></div>'
   +(e.status==='error'?'<div class=err style="margin:8px 0 0">'+esc(e.error)+'</div>':'')
-  +(e.status==='done'?(e.posts.length?'<div class=rposts>'+e.posts.map((p,pi)=>'<div class=rpost><div class=op>Original post '+lk(p.url,p.author)+'<span>'+esc(p.engagement||'')+'</span><span class=sp></span><button class=sm onclick="bjTarget('+ei+','+pi+',-1)">🐦 Blue Jay</button></div>'+(p.text?'<p style="margin:4px 0;font-size:13.5px">'+esc(p.text)+'</p>':'')
-   +(p.replies.length?p.replies.map((x,xi)=>'<blockquote>'+esc(x.text)+'<div class=by>'+lk(x.url,x.author)+'<span>'+esc(x.engagement||'')+'</span><span class=sp></span><button class=sm onclick="copy(RL['+ei+'].posts['+pi+'].replies['+xi+'].text)">⧉ Copy</button><button class=sm onclick="bjTarget('+ei+','+pi+','+xi+')">🐦 Blue Jay</button></div></blockquote>').join(''):'<p class=muted>No replies found.</p>')+'</div>').join('')+'</div>':'<p class=muted>No replies found.</p>'):'')+'</div>').join(''):'<div class=empty>Hit “💬 Get replies” on any trend card.</div>'}
+  +(e.status==='done'?(e.posts.length?'<div class=rposts>'+e.posts.map((p,pi)=>'<div class=rpost><div class=op>Original post '+lk(p.url,p.author)+'<span>'+esc(p.engagement||'')+'</span><span class=sp></span><button class=sm onclick="bjTarget('+ei+','+pi+',-1)">🐦 Blue Jay</button></div>'+(p.text?'<p style="margin:4px 0;font-size:13.5px">'+esc(p.text)+'</p>':'')+prBox(p.url,p.author,DRAFTS[e.trend]||'')
+   +(p.replies.length?p.replies.map((x,xi)=>'<blockquote>'+esc(x.text)+'<div class=by>'+lk(x.url,x.author)+'<span>'+esc(x.engagement||'')+'</span><span class=sp></span><button class=sm onclick="copy(RL['+ei+'].posts['+pi+'].replies['+xi+'].text)">⧉ Copy</button><button class=sm onclick="bjTarget('+ei+','+pi+','+xi+')">🐦 Blue Jay</button></div>'+prBox(x.url,x.author,'')+'</blockquote>').join(''):'<p class=muted>No replies found.</p>')+'</div>').join('')+'</div>':'<p class=muted>No replies found.</p>'):'')+'</div>').join(''):'<div class=empty>Hit “💬 Get replies” on any trend card.</div>';hydratePR($('rlist'))}
 function copyR(ei){const e=RL[ei];copy(e.trend+'\n'+(e.posts||[]).map(p=>'\nOriginal: '+(p.author||'')+' '+p.url+'\n'+(p.replies.length?p.replies.map(x=>'> '+x.text+'\n  — '+(x.author||'')+' '+x.url+(x.engagement?' ('+x.engagement+')':'')).join('\n'):'No replies found.')).join('\n'))}
 async function delR(id){if(!confirm('Delete this replies entry?'))return;const j=await api('/api/replies/delete',{id:id});j.ok?tick():toast(j.error,1)}
 async function bjCheck(){try{const r=await fetch(BJ+'/api/health',{signal:AbortSignal.timeout(2500)});bjUp=r.ok}catch(e){bjUp=false}$('bjdot').className='dot'+(bjUp?' on':'');$('bjt').textContent=bjUp?'Blue Jay':'Blue Jay offline'}
@@ -419,7 +559,7 @@ function copyCard(k){copy(cards[k].title+'\n'+cards[k].body)}
 function toBJ(k){const c=cards[k],m=c.body.match(IDEA);bj((m?m[1]:c.title).trim(),{trend:c.title,topic:c.topic})}
 function bjTarget(ei,pi,xi){const e=RL[ei],p=e.posts[pi],x=xi<0?p:p.replies[xi];bj('Re: '+e.trend+'\n\nReply target: '+x.url,{trend:e.trend,topic:e.topic,replyTo:x.url,replyToAuthor:x.author||'',replyToText:x.text||''})}
 async function muse(){if(!confirm('Send the latest hot topics from every column to Muse (leo-muse) on the Connecture bus?'))return;const j=await api('/api/muse',{label:'latest'});j.ok?toast('Sent to Muse · bus msg #'+j.id):toast(j.error,1);tick()}
-tick();loadModels();bjCheck();setInterval(tick,3000);setInterval(bjCheck,30000);
+tick();loadModels();bjCheck();loadPosted();setInterval(tick,3000);setInterval(bjCheck,30000);
 </script></body></html>`;
 
 const body = (req) => new Promise((res) => { let d = ""; req.on("data", (c) => { d += c; if (d.length > 2e5) req.destroy(); }); req.on("end", () => { try { res(JSON.parse(d || "{}")); } catch { res({}); } }); });
@@ -438,6 +578,7 @@ http.createServer(async (req, res) => {
     if (p === "/api/diff") { const f = u.searchParams.get("f"); return goodFile(f) ? json(res, { ok: true, ...diffFor(f) }) : json(res, { ok: false, error: "Report not found." }, 404); }
     if (p === "/api/summary") return json(res, { ok: true, columns: summary(), replies: replies.slice(0, 30), bluejay: BLUEJAY, generated: Date.now() });
     if (p === "/api/replies" && !post) return json(res, { ok: true, replies, ver: repliesVer });
+    if (p === "/api/posted" && !post) return json(res, { ok: true, replyAs: settings.replyAs, posted: posted.slice(0, 200) });
     if (p === "/api/reports") return json(res, { ok: true, reports: listReports((u.searchParams.get("q") || "").slice(0, 100)) });
     if (p === "/api/report") {
       const f = u.searchParams.get("f");
@@ -452,7 +593,7 @@ http.createServer(async (req, res) => {
       const key = String(b.key || "").trim();
       if (!/^xai-[A-Za-z0-9_-]{10,}$/.test(key)) return json(res, { ok: false, error: "That doesn't look like an xAI key (should start with xai-)." }, 400);
       writeFileSync(KEYFILE, key, { mode: 0o600 }); try { chmodSync(KEYFILE, 0o600); } catch {}
-      modelCache = null; lastError = ""; return json(res, { ok: true });
+      modelCache = null; lastError = ""; invalidateSessionCache(); detectSession(true).then((s) => { sessionSnap = s; }).catch(() => {}); return json(res, { ok: true });
     }
     if (p === "/api/settings") {
       if (b.model !== undefined) { if (!/^[\w.:-]{1,64}$/.test(b.model)) return json(res, { ok: false, error: "Model name looks wrong." }, 400); settings.model = b.model; }
@@ -482,20 +623,58 @@ http.createServer(async (req, res) => {
       const err = enqueue(ids); return json(res, err ? { ok: false, error: err } : { ok: true });
     }
     if (p === "/api/draft") { // DRAFT ONLY: returns text, never posts anywhere
-      if (!getKey()) return json(res, { ok: false, error: "Enter your API key first." });
       try {
-        const r = await client().responses.create({ model: settings.model, input: `Write one short, punchy X post (under 240 characters) about this trend. Plain, confident voice. No hashtags, at most one emoji. Return only the post text.\n\nTrend:\n${String(b.text || "").slice(0, 1500)}` });
-        recordUsage("draft", "", r.usage);
-        return json(res, { ok: true, text: r.toText().trim().replace(/^"(.*)"$/s, "$1") });
+        // Prefer free template when OpenCLI session is the default path; optional xAI only if forced via ? or no opencli
+        if (getKey() && !opencliAvailable()) {
+          try {
+            const r = await client().responses.create({ model: settings.model, input: `Write one short, punchy X post (under 240 characters) about this trend. Plain, confident voice. No hashtags, at most one emoji. Return only the post text.\n\nTrend:\n${String(b.text || "").slice(0, 1500)}` });
+            recordUsage("draft", "", r.usage);
+            return json(res, { ok: true, text: r.toText().trim().replace(/^"(.*)"$/s, "$1"), path: "xai" });
+          } catch (e) { console.log("draft xai failed, using free template", friendly(e)); }
+        }
+        return json(res, { ok: true, text: draftFree(b.text || ""), path: "free" });
       } catch (e) { return json(res, { ok: false, error: (lastError = friendly(e)) }); }
     }
     if (p === "/api/replies") { // finds REAL existing replies; never writes or posts any
-      if (!getKey()) return json(res, { ok: false, error: "Enter your API key first." });
       if (replies.filter((e) => e.status === "running").length >= 2) return json(res, { ok: false, error: "Two reply searches are already running. Wait for one to finish." });
       const title = clip(b.title, 300).trim(); if (!title) return json(res, { ok: false, error: "Missing trend." }, 400);
       const e = { id: "r" + Date.now().toString(36), ts: Date.now(), topic: clip(b.topic, 40), trend: title, status: "running", posts: [] };
       replies.unshift(e); replies = replies.slice(0, 60); saveReplies(); findReplies(e, b.text || "");
       return json(res, { ok: true, id: e.id });
+    }
+    if (p === "/api/reply") { // LIVE: posts a reply to ONE specific tweet via OpenCLI. dryRun:true only validates + shows the command.
+      const idIn = b.tweetId != null && String(b.tweetId).trim() ? tweetIdOf(b.tweetId) : "";
+      const idUrl = b.url ? tweetIdOf(b.url) : "";
+      if (b.tweetId != null && String(b.tweetId).trim() && !idIn) return json(res, { ok: false, error: "Invalid tweet id." }, 400);
+      if (b.url && !idUrl) return json(res, { ok: false, error: "That isn't an x.com status link." }, 400);
+      if (idIn && idUrl && idIn !== idUrl) return json(res, { ok: false, error: `Tweet id ${idIn} doesn't match the link (${idUrl}). Nothing posted.` }, 400);
+      const tweetId = idIn || idUrl;
+      if (!tweetId) return json(res, { ok: false, error: "Missing the tweet to reply to. Nothing posted." }, 400);
+      const target = `https://x.com/${b.url ? tweetHandleOf(b.url) : "i"}/status/${tweetId}`;
+      const text = String(b.text ?? "").replace(/\r\n?/g, "\n").trim();
+      const len = xLen(text);
+      if (!text) return json(res, { ok: false, error: "Reply is empty." }, 400);
+      if (len > 280) return json(res, { ok: false, error: `Reply is ${len}/280 characters. Trim it and try again.` }, 400);
+      const args = replyCommandArgs(target, text);
+      if (b.dryRun) return json(res, { ok: true, dryRun: true, tweetId, target, len, command: ["opencli", ...args] });
+      if (!opencliAvailable()) return json(res, { ok: false, error: "OpenCLI isn't installed where the desk expects it. Nothing posted." });
+      if (postingNow) return json(res, { ok: false, error: "Another reply is posting right now. Wait a few seconds." }, 409);
+      const dup = posted.find((x) => x.ok && x.tweetId === tweetId && x.text === text);
+      if (dup) return json(res, { ok: false, error: "You already posted this exact reply to that tweet" + (dup.url ? ": " + dup.url : ".") }, 409);
+      postingNow = true;
+      const rec = { ts: Date.now(), tweetId, target, text, as: settings.replyAs };
+      try {
+        const row = await postReplyFree(target, text);
+        Object.assign(rec, { ok: true, url: row && row.url ? String(row.url) : "", message: row && row.message ? String(row.message) : "Reply posted." });
+        console.log(new Date().toISOString(), "reply posted", tweetId, rec.url || "(no url returned)");
+        return json(res, { ok: true, tweetId, target, url: rec.url, message: rec.message });
+      } catch (e) {
+        const m = String(e && e.message || e).replace(/\s+/g, " ").slice(0, 300);
+        const maybeLive = /timed out|timeout|may already be live/i.test(m);
+        Object.assign(rec, { ok: false, error: m, maybeLive });
+        console.log(new Date().toISOString(), "reply failed", tweetId, m);
+        return json(res, { ok: false, tweetId, error: (maybeLive ? "Not confirmed, it may already be live. Check the tweet before retrying. " : "Not posted. ") + m });
+      } finally { postingNow = false; posted.unshift(rec); savePosted(); }
     }
     if (p === "/api/replies/delete") { const n = replies.length; replies = replies.filter((e) => e.id !== b.id); if (n === replies.length) return json(res, { ok: false, error: "Not found." }, 404); saveReplies(); return json(res, { ok: true }); }
     if (p === "/api/muse") {
@@ -509,3 +688,5 @@ http.createServer(async (req, res) => {
     res.writeHead(404); res.end();
   } catch (e) { json(res, { ok: false, error: friendly(e) }, 500); }
 }).listen(PORT, "127.0.0.1", () => console.log(`X Trends Desk on http://127.0.0.1:${PORT}`));
+process.on("uncaughtException", (e) => console.error(new Date().toISOString(), "uncaught", e && e.stack || e));
+process.on("unhandledRejection", (e) => console.error(new Date().toISOString(), "unhandledRejection", e && e.stack || e));

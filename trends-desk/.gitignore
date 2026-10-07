@@ -8,3 +8,6 @@ topics.json
 node_modules/
 *.log
 *.exe
+posted.json
+*.bak*
+fixtures/
